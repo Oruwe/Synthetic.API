@@ -2,28 +2,27 @@ flowchart TD
     Omi["🎙️ Omi\n(voice transcript)"] -->|POST /webhook/omi| Orchestrator
 
     subgraph Lyzr Agent Swarm
-        Orchestrator["Orchestrator\nplanner.py + executor.py\n(builds & runs DAGPlan)"]
-        WebNav["Web-Navigator\nshipping: portal_client.py + extractor.py\nresearch: searcher.py + screenshotter.py + vision_wrapper.py"]
-        Synth["Synthesizer\nwatcher.py + drafter.py\n(polls Qdrant, drafts response)"]
+        Orchestrator["Orchestrator\nplanner.py: calls Tavily, builds DAGPlan\nexecutor.py: runs it (unchanged since Day 1)"]
+        WebNav["Web-Navigator\npage_fetcher.py: HTTP+trafilatura fast path,\nPlaywright fallback, per-URL isolated"]
+        Synth["Synthesizer\nwatcher.py: polls run_store for completed runs\ndrafter.py: semantic retrieval + cited answer"]
     end
 
-    Portal[("Mock Legacy\nShipping Portal\n(Flask, no real API)")]
-    OpenWeb[("Open Web\n(DuckDuckGo search + any site)")]
-    Qdrant[("Qdrant\ndelayed_orders + web_knowledge\ncollections")]
-    Langfuse[("Langfuse\nLLM + vision trace UI")]
-    RunStore[("data/runs/*.json\nDAG run state")]
-    User["👤 User\n(notified)"]
+    OpenWeb[("Open Web\n(Tavily search + any site)")]
+    Qdrant[("Qdrant\nweb_pages collection\nchunked page text")]
+    RunStore[("data/runs/*.json\nDAG run state\n(shared volume, ALSO the async trigger)")]
+    Langfuse[("Langfuse\nLLM trace UI")]
+    User["👤 User\n(notified, cites sources)"]
 
-    Orchestrator -->|"DAG A: scrape → extract → embed"| WebNav
-    Orchestrator -->|"DAG B: search → screenshot → analyze → embed → curate"| WebNav
-    WebNav -->|Playwright login + scrape| Portal
-    WebNav -->|search + screenshot| OpenWeb
-    WebNav -->|"upsert(order, status=delayed)"| Qdrant
-    WebNav -->|"upsert(finding, status=candidate)\nthen curate: promote or DELETE"| Qdrant
-    Synth -.->|"poll: status=delayed OR status=permanent\n(ASYNC — no direct call)"| Qdrant
-    Synth -->|drafted response| User
+    Orchestrator -->|"Tavily search (in the planner, before the DAG)"| OpenWeb
+    Orchestrator -->|"DAG: fetch_pages → embed_pages"| WebNav
+    WebNav -->|HTTP GET / Playwright nav| OpenWeb
+    WebNav -->|"upsert chunk {url,title,text,question,run_id}"| Qdrant
 
     Orchestrator -.->|node state on every transition| RunStore
+    Synth -.->|"poll: any run just went terminal?\n(ASYNC trigger — no direct call)"| RunStore
+    Synth -->|"on trigger: semantic top-k query"| Qdrant
+    Synth -->|drafted, cited answer| User
+
     Orchestrator -.->|trace spans| Langfuse
     Synth -.->|trace spans| Langfuse
 

@@ -1,45 +1,40 @@
-"""Synthesizer entrypoint: a long-running process that polls Qdrant across
-both collections this system coordinates through and drafts + delivers a
-response whenever new points appear -- a shipping-order summary for
-"delayed" points, a cited research answer for "research" (curated
-permanent) points.
+"""Synthesizer entrypoint: a long-running process that watches for newly-
+completed DAG runs (see watcher.py for why the trigger reads run_store
+rather than diffing Qdrant) and drafts + delivers a cited answer for each,
+retrieved via semantic search over that run's chunks.
 """
 
-from qdrant_client.http import models as qm
-
+from agents.common import notifier, qdrant_store
 from agents.common.logging import configure_logging, get_logger
-from agents.synthesizer import drafter, notifier, watcher
+from agents.common.models.dag import RunState
+from agents.synthesizer import drafter, watcher
 
 configure_logging("synthesizer")
 logger = get_logger(component="synthesizer.main")
 
 
-def _handle_new_items(items: list[tuple[str, qm.Record]]) -> None:
-    delayed_by_run: dict[str, list[qm.Record]] = {}
-    research_by_run: dict[str, tuple[str, list[qm.Record]]] = {}
+def _handle_completed_runs(runs: list[RunState]) -> None:
+    for run in runs:
+        question = run.plan.transcript.strip()
+        fetch_node = next((n for n in run.plan.nodes if n.id == "fetch"), None)
+        sources_attempted = len(fetch_node.params.get("search_results", [])) if fetch_node else 0
 
-    for kind, record in items:
-        run_id = record.payload.get("run_id", "unknown")
-        if kind == "delayed":
-            delayed_by_run.setdefault(run_id, []).append(record)
-        elif kind == "research":
-            query = record.payload.get("query", "")
-            _, records = research_by_run.setdefault(run_id, (query, []))
-            records.append(record)
+        logger.info("drafting_answer", run_id=run.run_id, overall_status=run.overall_status, question=question)
+        chunks = qdrant_store.semantic_search_pages(run.run_id, question)
+        sources_succeeded = len({c.payload.get("url") for c in chunks if c.payload and c.payload.get("url")})
 
-    for run_id, run_records in delayed_by_run.items():
-        logger.info("drafting_summary", run_id=run_id, order_count=len(run_records))
-        summary = drafter.draft_summary(run_records, run_id)
-        notifier.notify(summary, run_id)
-
-    for run_id, (query, run_records) in research_by_run.items():
-        logger.info("drafting_research_answer", run_id=run_id, finding_count=len(run_records), query=query)
-        answer = drafter.draft_research_answer(run_records, run_id, query)
-        notifier.notify(answer, run_id)
+        answer = drafter.draft_answer(
+            chunks,
+            run.run_id,
+            question,
+            sources_attempted=sources_attempted,
+            sources_succeeded=sources_succeeded,
+        )
+        notifier.notify(answer, run.run_id)
 
 
 def main() -> None:
-    watcher.poll_loop(_handle_new_items)
+    watcher.poll_loop(_handle_completed_runs)
 
 
 if __name__ == "__main__":

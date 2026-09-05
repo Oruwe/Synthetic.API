@@ -17,12 +17,17 @@ class NodeType(str, Enum):
     EXTRACT_VALIDATE = "extract_validate"
     EMBED_STORE = "embed_store"
     CLARIFY_UNSUPPORTED = "clarify_unsupported"
-    # Web-Researcher: search -> screenshot -> vision-analyze -> embed -> curate
+    # Web-Researcher (DDG+vision) -- retired from live routing, kept for the
+    # dormant pipeline/tests, see agents/web_navigator/research_handlers.py
     SEARCH_WEB = "search_web"
     CAPTURE_SCREENSHOTS = "capture_screenshots"
     ANALYZE_SCREENSHOTS = "analyze_screenshots"
     EMBED_CANDIDATES = "embed_candidates"
     CURATE_KNOWLEDGE = "curate_knowledge"
+    # Live research path: Tavily search (done in the planner, before the
+    # DAG is built) -> fetch (HTTP+trafilatura, Playwright fallback) -> chunk+embed
+    FETCH_PAGES = "fetch_pages"
+    EMBED_PAGES = "embed_pages"
 
 
 class DAGNode(BaseModel):

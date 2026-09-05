@@ -1,18 +1,21 @@
 """Qdrant as the shared, asynchronous coordination layer between agents.
 
-Two independent pipelines write here, each its own collection:
-- Web-Navigator (shipping): upserts extracted orders tagged `status=delayed`.
-- Web-Researcher: upserts screenshot analyses tagged `status=candidate`,
-  then curate_candidates() promotes relevant ones to `status=permanent`
-  and hard-deletes the rest ("majority junk") based on relevance to the
-  original query.
+THREE pipelines have written here across this project's iterations, each
+its own collection — only the third is live/routed today, the first two
+are retired but their code and collections are left in place:
+- Web-Navigator (shipping, RETIRED from live routing): extracted orders
+  tagged `status=delayed`.
+- Web-Researcher (DDG+vision, RETIRED from live routing): screenshot
+  analyses tagged `status=candidate`, curated via curate_candidates().
+- Search+fetch+chunk (LIVE): chunked page text, upsert_page_chunk() below,
+  retrieved via semantic_search_pages() rather than an exact payload filter.
 
-The Synthesizer polls for new `delayed`/`permanent` points rather than
-being called directly — that indirection is the point: agents coordinate
-through shared memory, not a direct function/RPC call between them.
+Agents coordinate through this shared memory rather than calling each
+other directly — the Synthesizer reads what Web-Navigator wrote, with no
+direct call between them.
 
 Embeddings use FastEmbed (local, CPU, no API key) so this works offline
-and doesn't burn a limited hackathon LLM credit budget on every row/page.
+and doesn't burn a limited hackathon LLM credit budget on every row/page/chunk.
 """
 
 import math
@@ -23,9 +26,11 @@ from fastembed import TextEmbedding
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
 
+from agents.common.chunking import chunk_text
 from agents.common.config import settings
 from agents.common.logging import get_logger
 from agents.common.models.orders import DelayedOrder
+from agents.common.models.page import FetchedPage
 from agents.common.models.research import VisionFinding
 
 logger = get_logger(component="qdrant_store")
@@ -230,6 +235,82 @@ def scroll_new_permanent_research(seen_point_ids: set[str]) -> list[qm.Record]:
     what the Synthesizer's watcher polls to notice a curated research run."""
     scroll_filter = qm.Filter(must=[qm.FieldCondition(key="status", match=qm.MatchValue(value="permanent"))])
     return _scroll_all_matching(settings.qdrant_research_collection, scroll_filter, seen_point_ids=seen_point_ids)
+
+
+# --- Search + fetch + chunk (web_pages collection, the LIVE path) ----------
+
+
+def upsert_page_chunks(page: FetchedPage, question: str, run_id: str, client: QdrantClient | None = None) -> list[str]:
+    """Chunks one fetched page's text and upserts each chunk as its own
+    point -- "exact query, chunked page text" per the pivot spec, as opposed
+    to one embedding for a whole page or a whole structured record.
+
+    A page with `error` set (fetch failed) or empty text is a no-op: there's
+    nothing to embed, and the caller (page_handlers.py) already logs the
+    failure -- this function doesn't need to re-raise or re-log it.
+    """
+    if page.error is not None or not page.text.strip():
+        return []
+
+    client = client or get_client()
+    ensure_collection(settings.qdrant_pages_collection, client)
+
+    chunks = chunk_text(page.text)
+    point_ids: list[str] = []
+    for i, chunk in enumerate(chunks):
+        point_key = f"{run_id}:{page.url}:{i}"
+        vector = embed_text(chunk)
+        client.upsert(
+            collection_name=settings.qdrant_pages_collection,
+            points=[
+                qm.PointStruct(
+                    id=_stable_uuid(point_key),
+                    vector=vector,
+                    payload={
+                        "run_id": run_id,
+                        "question": question,
+                        "url": page.url,
+                        "title": page.title,
+                        "text": chunk,
+                        "chunk_index": i,
+                        "fetch_method": page.fetch_method,
+                        "timestamp": page.timestamp.isoformat(),
+                        "point_key": point_key,
+                    },
+                )
+            ],
+        )
+        point_ids.append(point_key)
+    return point_ids
+
+
+def semantic_search_pages(run_id: str, question: str, top_k: int | None = None) -> list[qm.ScoredPoint]:
+    """Top-k semantic retrieval over this run's chunks, scoped to `run_id` --
+    replaces the old exact-payload-filter read pattern (see
+    scroll_new_delayed/scroll_new_permanent_research above) with a real
+    vector query using the question's own embedding.
+
+    Never raises: a Qdrant outage or a run with zero successfully-embedded
+    chunks both come back as an empty list, logged, so the Synthesizer can
+    still produce a caveated "couldn't retrieve results" answer instead of
+    crashing its poll loop.
+    """
+    top_k = top_k or settings.research_top_k
+    try:
+        client = get_client()
+        ensure_collection(settings.qdrant_pages_collection, client)
+        query_vector = embed_text(question)
+        response = client.query_points(
+            collection_name=settings.qdrant_pages_collection,
+            query=query_vector,
+            query_filter=qm.Filter(must=[qm.FieldCondition(key="run_id", match=qm.MatchValue(value=run_id))]),
+            limit=top_k,
+            with_payload=True,
+        )
+        return response.points
+    except Exception as exc:  # noqa: BLE001 - retrieval failing must not crash the Synthesizer
+        logger.warning("semantic_search_failed", run_id=run_id, error=str(exc))
+        return []
 
 
 # --- Shared pagination helper ------------------------------------------------

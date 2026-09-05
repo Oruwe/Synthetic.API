@@ -12,6 +12,10 @@ class SearchResult(BaseModel):
 
     title: str
     url: str
+    # Optional: populated by search_wrapper.py (Tavily returns a content
+    # preview per result); left unset by the older DuckDuckGo-based
+    # searcher.py, which never had a snippet to offer.
+    snippet: str | None = None
 
 
 class ScreenshotCapture(BaseModel):

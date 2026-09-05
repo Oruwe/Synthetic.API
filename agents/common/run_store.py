@@ -13,7 +13,10 @@ import os
 from pathlib import Path
 
 from agents.common.config import settings
+from agents.common.logging import get_logger
 from agents.common.models.dag import DAGPlan, NodeExecutionState, RunState
+
+logger = get_logger(component="run_store")
 
 
 def _run_path(run_id: str) -> Path:
@@ -50,3 +53,32 @@ def load_run(run_id: str) -> RunState | None:
     if not path.exists():
         return None
     return RunState.model_validate_json(path.read_text())
+
+
+def list_runs() -> list[RunState]:
+    """Used by the Synthesizer's watcher (agents/synthesizer/watcher.py) to
+    find newly-completed runs -- this directory is bind-mounted into both
+    the orchestrator and synthesizer containers (see docker-compose.yml),
+    so it's a reliable, already-shared place to read "is this run's data
+    actually all there yet" from, rather than inferring it from Qdrant
+    writes landing mid-batch.
+
+    Files starting with "_" (e.g. the watcher's own seen-run tracking file)
+    are skipped, as are any that fail to parse -- a corrupt/partial run
+    file is logged and skipped rather than raised, consistent with every
+    other per-item isolation in this codebase.
+    """
+    directory = Path(settings.run_store_dir)
+    if not directory.exists():
+        return []
+
+    runs: list[RunState] = []
+    for path in directory.glob("*.json"):
+        if path.name.startswith("_"):
+            continue
+        try:
+            runs.append(RunState.model_validate_json(path.read_text()))
+        except Exception as exc:  # noqa: BLE001 - one bad file must not break the whole listing
+            logger.warning("run_file_unreadable", path=str(path), error=str(exc))
+            continue
+    return runs

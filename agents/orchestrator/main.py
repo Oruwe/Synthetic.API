@@ -11,11 +11,15 @@ from pydantic import BaseModel
 
 from agents.common import run_store
 from agents.common.logging import configure_logging, get_logger
-from agents.orchestrator import handlers as orchestrator_handlers  # noqa: F401 - registers handlers
 from agents.orchestrator import omi_webhook, planner
 from agents.orchestrator.executor import execute_plan
-from agents.web_navigator import handlers as web_navigator_handlers  # noqa: F401 - registers handlers
-from agents.web_navigator import research_handlers  # noqa: F401 - registers handlers
+from agents.web_navigator import page_handlers  # noqa: F401 - registers handlers
+# NOTE: agents.orchestrator.handlers, agents.web_navigator.handlers, and
+# agents.web_navigator.research_handlers registered the shipping-portal and
+# DDG+vision pipelines' DAG node handlers. Both pipelines are retired from
+# live routing (see planner.py) -- their modules are still present and
+# still tested, just no longer imported here, so their handler_keys are
+# absent from HANDLER_REGISTRY in the live app.
 
 configure_logging("orchestrator")
 logger = get_logger(component="orchestrator.main")

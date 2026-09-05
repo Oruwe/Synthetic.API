@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://qdrant:6333"
     qdrant_collection: str = "delayed_orders"
     qdrant_research_collection: str = "web_knowledge"
+    # The new live path's collection (chunked page text, not structured
+    # order records or vision-model findings). Separate name per the pivot
+    # spec, rather than mixing schemas into an existing collection.
+    qdrant_pages_collection: str = "web_pages"
 
     # --- Run state ---
     run_store_dir: str = "/data/runs"
@@ -42,18 +46,20 @@ class Settings(BaseSettings):
     openrouter_app_url: str = "https://github.com/Oruwe/Synthetic.API"
     openrouter_app_name: str = "Synthetic.API"
 
-    # --- Web-Researcher: keyless search, screenshots, open-weight vision model ---
-    # Qwen2.5-VL is Apache-2.0 licensed and, as of writing, one of the
-    # strongest open-weight vision-language models on general
-    # screenshot/document understanding -- check
-    # https://openrouter.ai/rankings before a demo, a better one may exist
-    # by then. No code change needed to swap it, same as OPENROUTER_MODEL.
+    # --- Search + fetch + chunk + semantic retrieval (the LIVE research path) ---
+    tavily_api_key: str = ""
+    research_max_results: int = 5
+    # Fast-path HTTP GET timeout AND the Playwright fallback's timeout --
+    # kept in one setting since both paths apply it per-URL the same way.
+    page_fetch_timeout_seconds: float = 9.0
+    research_top_k: int = 5
+
+    # --- Retired from live routing, kept for the dormant DDG+vision pipeline
+    # (agents/web_navigator/searcher.py, screenshotter.py,
+    # research_handlers.py, common/vision_wrapper.py -- still present,
+    # still tested, just not imported by orchestrator/main.py anymore) ---
     openrouter_vision_model: str = "qwen/qwen2.5-vl-72b-instruct"
     search_engine_url: str = "https://html.duckduckgo.com/html/"
-    research_max_results: int = 5
-    # Cosine similarity cutoff for the curate_knowledge step: candidates
-    # scoring >= this against the original query are kept permanently,
-    # everything else ("majority junk") is deleted from Qdrant.
     research_relevance_threshold: float = 0.35
     screenshot_dir: str = "/data/screenshots"
 
