@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ShipTrack Legacy Portal — Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>ShipTrack&trade; Portal</h1>
+    <a href="/logout" data-testid="logout-link">Log out</a>
+  </header>
+
+  <main>
+    <h2>Order Dashboard</h2>
+    <table data-testid="orders-table">
+      <thead>
+        <tr>
+          <th>Order ID</th>
+          <th>Customer</th>
+          <th>Destination</th>
+          <th>Expected Date</th>
+          <th>Status</th>
+          <th>Carrier</th>
+          <th>Delay Reason</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for order in orders %}
+        <tr data-testid="order-row" data-order-id="{{ order.order_id }}" data-status="{{ order.status }}">
+          <td data-field="order_id">{{ order.order_id }}</td>
+          <td data-field="customer_name">{{ order.customer_name }}</td>
+          <td data-field="destination">{{ order.destination }}</td>
+          <td data-field="expected_date">{{ order.expected_date }}</td>
+          <td data-field="status">{{ order.status }}</td>
+          <td data-field="carrier">{{ order.carrier or "" }}</td>
+          <td data-field="delay_reason">{{ order.delay_reason or "" }}</td>
+          <td data-field="raw_notes">{{ order.raw_notes or "" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </main>
+</body>
+</html>

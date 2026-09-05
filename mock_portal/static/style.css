@@ -1,0 +1,15 @@
+body { font-family: Tahoma, Geneva, sans-serif; background: #eef1f5; color: #222; margin: 0; }
+header { background: #1f3a5f; color: #fff; padding: 12px 24px; display: flex; justify-content: space-between; align-items: center; }
+header a { color: #cfe0ff; }
+main { padding: 24px; }
+.login-box { max-width: 320px; margin: 80px auto; background: #fff; padding: 24px; border: 1px solid #ccc; border-radius: 4px; }
+.login-box h1 { margin: 0 0 4px; font-size: 20px; }
+.subtitle { color: #666; font-size: 12px; margin-top: 0; }
+label { display: block; margin-top: 12px; font-size: 13px; }
+input { width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box; }
+button { margin-top: 16px; padding: 8px 16px; background: #1f3a5f; color: #fff; border: none; border-radius: 3px; cursor: pointer; }
+.error { color: #b00020; font-size: 13px; }
+table { border-collapse: collapse; width: 100%; background: #fff; }
+th, td { border: 1px solid #ccc; padding: 8px; font-size: 13px; text-align: left; }
+th { background: #dde5ef; }
+tr[data-status="delayed"] { background: #fff4e5; }

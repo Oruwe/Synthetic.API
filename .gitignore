@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+data/runs/*.json
+!data/runs/.gitkeep
+qdrant_storage/
+langfuse_storage/
+postgres_data/
+*.log
+.DS_Store

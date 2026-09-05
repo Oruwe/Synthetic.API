@@ -1,0 +1,27 @@
+flowchart TD
+    Omi["🎙️ Omi\n(voice transcript)"] -->|POST /webhook/omi| Orchestrator
+
+    subgraph Lyzr Agent Swarm
+        Orchestrator["Orchestrator\nplanner.py + executor.py\n(builds & runs DAGPlan)"]
+        WebNav["Web-Navigator\nportal_client.py + extractor.py\n(Playwright, deterministic DOM extraction)"]
+        Synth["Synthesizer\nwatcher.py + drafter.py\n(polls Qdrant, drafts summary)"]
+    end
+
+    Portal[("Mock Legacy\nShipping Portal\n(Flask, no real API)")]
+    Qdrant[("Qdrant\nshared vector memory\ncollection: delayed_orders")]
+    Langfuse[("Langfuse\nLLM trace UI")]
+    RunStore[("data/runs/*.json\nDAG run state")]
+    User["👤 Ops team\n(notified)"]
+
+    Orchestrator -->|DAG: scrape → extract → embed| WebNav
+    WebNav -->|Playwright login + scrape| Portal
+    WebNav -->|"upsert(order, status=delayed)"| Qdrant
+    Synth -.->|"poll: new points where status=delayed\n(ASYNC — no direct call)"| Qdrant
+    Synth -->|drafted summary| User
+
+    Orchestrator -.->|node state on every transition| RunStore
+    Orchestrator -.->|trace spans| Langfuse
+    Synth -.->|trace spans| Langfuse
+
+    classDef async stroke-dasharray: 5 5;
+    class Synth async;

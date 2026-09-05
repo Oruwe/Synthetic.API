@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ShipTrack Legacy Portal — Login</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="login-box">
+    <h1>ShipTrack&trade; Portal</h1>
+    <p class="subtitle">Internal Logistics Dashboard v2.1</p>
+    {% if error %}
+      <p class="error" data-testid="login-error">{{ error }}</p>
+    {% endif %}
+    <form method="post" action="/login" data-testid="login-form">
+      <label for="username">Username</label>
+      <input type="text" id="username" name="username" data-testid="username-input" autocomplete="username" required>
+
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" data-testid="password-input" autocomplete="current-password" required>
+
+      <button type="submit" data-testid="login-submit">Log In</button>
+    </form>
+  </div>
+</body>
+</html>
