@@ -98,11 +98,13 @@ a caveat, never a crash:
 
 | Call | Failure mode | Fallback |
 |---|---|---|
-| Tavily search (`search_wrapper.py`) | no key / timeout / bad response | logs, returns `[]` — plan still builds |
-| HTTP fetch (`page_fetcher.py`, fast path) | timeout / non-HTML / too little text | falls through to the Playwright fallback |
-| Playwright fetch (`page_fetcher.py`, fallback) | timeout / nav error | that URL recorded with `error` set, loop continues — **one bad site never fails the batch** |
+| Tavily search (`search_wrapper.py`) | no key / timeout / 5xx | retried up to 3x with backoff; a 4xx (bad key) fails fast, no point retrying; still logs and returns `[]` if all attempts fail — plan still builds |
+| HTTP fetch (`page_fetcher.py`, fast path) | timeout / non-HTML / too little content | falls through to the Playwright fallback |
+| Playwright fetch (`page_fetcher.py`, fallback) | launch hang / nav timeout / HTTP 4xx-5xx status | that URL recorded with `error` set, loop continues — **one bad site never fails the batch** |
+| robots.txt check (`robots.py`) | fetch/parse failure | fails OPEN (allow) — a robots.txt hiccup must not block an otherwise-legitimate fetch |
 | Per-page embed+upsert (`page_handlers.py`) | Qdrant/embedding error on one page | that page skipped and logged, others still embedded |
 | Semantic retrieval at draft time (`qdrant_store.semantic_search_pages`) | Qdrant outage | logs, returns `[]` — drafter emits a "couldn't find sources" answer instead of crashing the poll loop |
+| Retention sweep (`run_store.prune_old_runs`, `qdrant_store.prune_old_page_chunks`) | disk/Qdrant error mid-sweep | logs, does nothing this cycle — never kills the poll loop |
 | LLM drafting call (`lyzr_wrapper.py` / `drafter.py`) | no key / API error | falls back to a deterministic template answer |
 
 The drafted answer **always** states which source URLs it actually used,
@@ -110,6 +112,59 @@ and **always** states when it's based on a partial set (fewer sources
 succeeded than were attempted) — appended after the LLM call rather than
 left to the model's own instruction-following, so this is true even if
 the model ignores the prompt or the template fallback fires instead.
+
+## Robustness hardening (added after a self-review found real gaps)
+
+A deliberate second pass targeted the gaps a code-review-level confidence
+can't catch — scaling under real traffic, courtesy to the sites being
+fetched, and whether the system has ever actually run, not just been
+reasoned about:
+
+- **The async trigger scales.** The Synthesizer used to scan and re-parse
+  every run file on every 5-second poll forever — fine at demo volume, a
+  real slowdown after a day of real traffic. `run_store.py` now maintains
+  a small `_runs_index.json` updated incrementally (lock-protected against
+  concurrent node completions across different runs), so each poll is
+  O(1) plus O(newly-terminal runs) — normally 0 or 1, not "every run ever."
+- **Nothing grows forever.** `run_store.prune_old_runs()` and
+  `qdrant_store.prune_old_page_chunks()` delete data past
+  `RUN_RETENTION_HOURS` (default 24h), swept periodically (not on every
+  poll — see `SYNTHESIZER_PRUNE_EVERY_N_POLLS`) from the same watch loop.
+- **Liveness and readiness are split**, the standard production pattern:
+  `/health` is always 200 if the process is up; `/ready` (503 when not)
+  actually checks Qdrant connectivity and reports (without failing on)
+  missing API keys — a container can no longer claim to be fine while
+  unable to do anything useful. The Synthesizer, which has no HTTP server,
+  gets the equivalent via a heartbeat file `watcher.py` writes every poll
+  iteration, checked by its own docker-compose healthcheck.
+- **robots.txt is respected** (`agents/web_navigator/robots.py`, fetched
+  once per domain, cached, fails open) and **a per-domain rate limit**
+  (`rate_limiter.py`) keeps several results landing on the same site from
+  hammering it back-to-back.
+- **A real bug, found by actually running the code, not reading it:**
+  Playwright's `page.goto()` does not raise on an HTTP error status — a
+  404 or 500 still "loads" successfully as far as Playwright is concerned.
+  Every Playwright-based fetch in this repo (the live fallback path, plus
+  the dormant `screenshotter.py`/`searcher.py`) was silently treating a
+  dead link's own error-page HTML as real content until this was caught by
+  `tests/test_page_fetcher_live.py` — a real local HTTP server, real
+  httpx, real trafilatura, real headless Chromium, no mocking — and fixed
+  by checking `response.status` explicitly. This is the strongest evidence
+  in this repo that "carefully reasoned about" and "actually verified by
+  running it" are different claims; run
+  `RUN_LIVE_FETCH_TESTS=1 uv run pytest tests/test_page_fetcher_live.py`
+  (needs a real Chromium binary — the Dockerfile has one) any time
+  `page_fetcher.py` changes.
+- **Genuine concurrency, not simulated:** `tests/test_concurrency.py` runs
+  20 real DAG plans from real threads at once — the actual shape of
+  production load — and asserts no run's state leaks into another's file
+  and the index never drops an update.
+- **What's still honestly unverifiable from here:** this sandbox has no
+  Docker daemon and no outbound internet access beyond a small
+  package-registry allowlist, so Tavily itself and the full
+  `docker compose up` orchestration have never been exercised end-to-end
+  by this assistant — only by you, on your machine. Everything above is
+  the maximum verification achievable without that.
 
 ## What's dormant (kept, not deleted, not live)
 
@@ -144,20 +199,27 @@ that block as data, never instructions, regardless of what it contains.
 
 ```
 agents/common/
-  search_wrapper.py    Tavily call, isolated + fail-safe
+  search_wrapper.py    Tavily call, isolated + fail-safe + retried
   chunking.py           pure chunk_text(), offline-testable
+  readiness.py           /ready checks (Qdrant reachable, keys configured)
   models/page.py         FetchedPage schema
-  qdrant_store.py        upsert_page_chunks / semantic_search_pages (+ dormant pipelines' functions)
-  run_store.py            + list_runs(), the watcher's trigger source
+  qdrant_store.py        upsert_page_chunks / semantic_search_pages / prune_old_page_chunks
+                          (+ dormant pipelines' functions)
+  run_store.py            indexed lookups (list_run_summaries) + prune_old_runs,
+                          the watcher's trigger source
 agents/web_navigator/
   page_fetcher.py        HTTP+trafilatura fast path, Playwright fallback, per-URL isolated
+  robots.py                robots.txt check, cached per domain, fails open
+  rate_limiter.py           per-domain courtesy throttle
   page_handlers.py        registers fetch_pages / embed_pages DAG node handlers
 agents/orchestrator/
   planner.py              Tavily search -> 2-node DAGPlan (fetch_pages -> embed_pages)
   executor.py              DAG engine (unchanged)
-  main.py                  FastAPI: /trigger, /webhook/omi, /runs/{run_id} (unchanged contract)
+  main.py                  FastAPI: /health (liveness), /ready (readiness), /trigger,
+                          /webhook/omi, /runs/{run_id} (unchanged contract)
 agents/synthesizer/
-  watcher.py               polls run_store for newly-completed runs
+  watcher.py               polls run_store's index for newly-completed runs,
+                          writes a heartbeat file, sweeps retention periodically
   drafter.py                draft_answer(): semantic retrieval, cited, partial-results-aware
 ```
 
@@ -177,6 +239,8 @@ Then:
 - `docker compose logs -f agents-orchestrator agents-synthesizer` — structured
   logs correlated by `run_id`, including which URLs succeeded/failed and
   via which fetch method.
+- `curl -s http://localhost:8000/ready | python3 -m json.tool` — per-dependency
+  readiness (Qdrant reachable, which API keys are actually configured).
 - `curl -s http://localhost:8000/runs/<run_id> | python3 -m json.tool` — live
   DAG run state (same content as `data/runs/<run_id>.json`).
 - `http://localhost:6333/dashboard` — Qdrant collection `web_pages`.
@@ -190,13 +254,25 @@ uv sync
 uv run pytest -q
 ```
 
-95 tests, fully offline (no Docker, no network, no API keys) — the DAG
-executor, chunking, the search/fetch/embed/retrieve pipeline (all mocked
-at the I/O boundary), and the run_store-based watcher are all exercised
-with mocked/synthetic inputs. The dormant pipelines' tests still run too
-(nothing about them broke). Real, acknowledged gap, not a hidden one:
-Playwright-driven code itself isn't covered by CI — that needs a live
-browser.
+132 tests, fully offline (no Docker, no network, no API keys) — the DAG
+executor (including genuine multi-threaded concurrency, not simulated),
+chunking, the search/fetch/embed/retrieve pipeline (mocked at the I/O
+boundary), retention/pruning, readiness checks, and the indexed watcher
+are all exercised. The dormant pipelines' tests still run too (nothing
+about them broke).
+
+Plus 5 opt-in tests against a **real** local HTTP server and a **real**
+headless Chromium — no mocking of httpx, trafilatura, or Playwright:
+
+```bash
+RUN_LIVE_FETCH_TESTS=1 uv run pytest tests/test_page_fetcher_live.py
+```
+
+Skipped by default (needs a real Chromium binary CI doesn't have — the
+Dockerfile does), but this is the one place in the suite that proves the
+fetch pipeline actually works end-to-end rather than that its mocks agree
+with each other. It found a real bug the mocked suite couldn't (see
+"Robustness hardening" above).
 
 ## Known integration gaps (flagged, not hidden)
 
@@ -207,8 +283,9 @@ browser.
 - `agents/orchestrator/omi_webhook.py` — accepts a couple of plausible Omi
   payload shapes; `parse_omi_payload` is the only place that needs to
   change once the real webhook contract is confirmed.
-- `docker-compose.yml`'s `agents-orchestrator` still lists `mock_portal`
-  as a `service_healthy` startup dependency even though the live path no
-  longer uses it — left as-is deliberately (compose service
-  names/ports/network were kept untouched in this pivot), but worth
-  knowing if you ever want to run without the mock portal container.
+- **Tavily itself, and the full `docker compose up` orchestration, have
+  never been run by this assistant** — no Docker daemon and no general
+  outbound internet access in the sandbox this was built in. Everything
+  short of that has been verified (see "Robustness hardening" above); this
+  is the one gap that requires you, on your machine, with a real
+  `TAVILY_API_KEY`.

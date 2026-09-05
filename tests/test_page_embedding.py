@@ -16,11 +16,13 @@ class _FakeCollections:
 
 
 class FakeClient:
-    def __init__(self, query_points_result=None):
+    def __init__(self, query_points_result=None, scroll_pages=None):
         self._collection_names = {"web_pages"}
         self.upsert_calls = []
         self.query_points_calls = []
+        self.delete_calls = []
         self._query_points_result = query_points_result or SimpleNamespace(points=[])
+        self._scroll_pages = list(scroll_pages or [])
 
     def get_collections(self):
         return _FakeCollections(self._collection_names)
@@ -34,6 +36,12 @@ class FakeClient:
     def query_points(self, **kwargs):
         self.query_points_calls.append(kwargs)
         return self._query_points_result
+
+    def scroll(self, **kwargs):
+        return self._scroll_pages.pop(0)
+
+    def delete(self, **kwargs):
+        self.delete_calls.append(kwargs)
 
 
 def _page(text="x" * 2000, error=None):
@@ -104,3 +112,41 @@ def test_semantic_search_pages_never_raises_on_qdrant_failure(monkeypatch):
     results = qdrant_store.semantic_search_pages(run_id="run-1", question="q")
 
     assert results == []
+
+
+# --- prune_old_page_chunks ---------------------------------------------
+
+
+def _old_point(point_id):
+    return SimpleNamespace(id=point_id, payload={"point_key": point_id})
+
+
+def test_prune_old_page_chunks_deletes_matched_points(monkeypatch):
+    old_points = [_old_point("p1"), _old_point("p2")]
+    client = FakeClient(scroll_pages=[(old_points, None)])
+    monkeypatch.setattr(qdrant_store, "_client", client)
+
+    pruned = qdrant_store.prune_old_page_chunks(max_age_hours=24)
+
+    assert pruned == 2
+    assert client.delete_calls[0]["points_selector"].points == ["p1", "p2"]
+
+
+def test_prune_old_page_chunks_noop_when_nothing_old(monkeypatch):
+    client = FakeClient(scroll_pages=[([], None)])
+    monkeypatch.setattr(qdrant_store, "_client", client)
+
+    pruned = qdrant_store.prune_old_page_chunks(max_age_hours=24)
+
+    assert pruned == 0
+    assert client.delete_calls == []
+
+
+def test_prune_old_page_chunks_never_raises_on_qdrant_failure(monkeypatch):
+    class BrokenClient(FakeClient):
+        def scroll(self, **kwargs):
+            raise RuntimeError("qdrant is down")
+
+    monkeypatch.setattr(qdrant_store, "_client", BrokenClient())
+
+    assert qdrant_store.prune_old_page_chunks(max_age_hours=24) == 0

@@ -34,7 +34,10 @@ _PAGE_DEFAULT_TIMEOUT_MS = 15_000
 
 def scrape_dashboard_rows() -> list[dict[str, str]]:
     with sync_playwright() as p:
-        launch_kwargs = {"headless": True}
+        # `timeout=` bounds the browser LAUNCH itself, which
+        # page.set_default_timeout() below does not cover (that only
+        # applies to page-level operations on an already-running browser).
+        launch_kwargs = {"headless": True, "timeout": _PAGE_DEFAULT_TIMEOUT_MS}
         if _CHROMIUM_EXECUTABLE_OVERRIDE:
             launch_kwargs["executable_path"] = _CHROMIUM_EXECUTABLE_OVERRIDE
         browser = p.chromium.launch(**launch_kwargs)

@@ -24,6 +24,13 @@ class Settings(BaseSettings):
 
     # --- Run state ---
     run_store_dir: str = "/data/runs"
+    # How long a completed run's JSON file (and its Qdrant chunks) are kept
+    # before prune_old_runs()/prune_old_page_chunks() delete them -- bounds
+    # otherwise-unbounded growth of both data/runs/ and the web_pages
+    # collection. Swept periodically (see synthesizer_prune_every_n_polls
+    # below), not on every poll.
+    run_retention_hours: float = 24.0
+    synthesizer_prune_every_n_polls: int = 720  # ~1 hour at the default 5s poll interval
     # 2, not a bigger number: the standard shipping-portal plan only has 3
     # nodes, so a higher default (5) could never actually trip on it -- the
     # breaker would pass its own unit tests yet be structurally inert on

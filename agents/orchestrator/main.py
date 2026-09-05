@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from agents.common import run_store
 from agents.common.logging import configure_logging, get_logger
+from agents.common.readiness import run_readiness_checks
 from agents.orchestrator import omi_webhook, planner
 from agents.orchestrator.executor import execute_plan
 from agents.web_navigator import page_handlers  # noqa: F401 - registers handlers
@@ -38,7 +39,23 @@ class TriggerResponse(BaseModel):
 
 @app.get("/health")
 def health():
+    """Liveness only: is the process up and answering HTTP at all. Always
+    200 if this handler runs -- see /ready for whether it can actually do
+    anything useful."""
     return {"status": "ok"}
+
+
+@app.get("/ready")
+def ready():
+    """Readiness: can this process actually serve a request right now.
+    503 when a hard-required dependency (Qdrant) is unreachable; missing
+    API keys are reported but don't fail readiness -- the system still
+    answers, just degraded (see agents/common/readiness.py)."""
+    is_ready, checks = run_readiness_checks()
+    body = {"ready": is_ready, "checks": [c.__dict__ for c in checks]}
+    if not is_ready:
+        raise HTTPException(status_code=503, detail=body)
+    return body
 
 
 @app.post("/trigger", response_model=TriggerResponse)

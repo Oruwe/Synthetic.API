@@ -20,7 +20,7 @@ and doesn't burn a limited hackathon LLM credit budget on every row/page/chunk.
 
 import math
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastembed import TextEmbedding
 from qdrant_client import QdrantClient
@@ -311,6 +311,37 @@ def semantic_search_pages(run_id: str, question: str, top_k: int | None = None) 
     except Exception as exc:  # noqa: BLE001 - retrieval failing must not crash the Synthesizer
         logger.warning("semantic_search_failed", run_id=run_id, error=str(exc))
         return []
+
+
+def prune_old_page_chunks(max_age_hours: float | None = None) -> int:
+    """Deletes web_pages chunks older than `max_age_hours` (by their stored
+    `timestamp` payload field) -- bounds the otherwise-unbounded growth of
+    the live collection. Called periodically from the Synthesizer's poll
+    loop (see watcher.py), alongside run_store.prune_old_runs(). Never
+    raises: a Qdrant outage here is logged and the sweep just does nothing
+    this cycle, same fail-open discipline as every other Qdrant call.
+    """
+    max_age_hours = max_age_hours if max_age_hours is not None else settings.run_retention_hours
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+
+    try:
+        client = get_client()
+        ensure_collection(settings.qdrant_pages_collection, client)
+        old_filter = qm.Filter(
+            must=[qm.FieldCondition(key="timestamp", range=qm.DatetimeRange(lt=cutoff))]
+        )
+        old_points = _scroll_all_matching(settings.qdrant_pages_collection, old_filter, seen_point_ids=None)
+        if not old_points:
+            return 0
+        client.delete(
+            collection_name=settings.qdrant_pages_collection,
+            points_selector=qm.PointIdsList(points=[p.id for p in old_points]),
+        )
+        logger.info("page_chunks_pruned", count=len(old_points), max_age_hours=max_age_hours)
+        return len(old_points)
+    except Exception as exc:  # noqa: BLE001 - a pruning failure must not crash the poll loop
+        logger.warning("page_chunk_prune_failed", error=str(exc))
+        return 0
 
 
 # --- Shared pagination helper ------------------------------------------------

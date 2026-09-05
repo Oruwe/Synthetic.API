@@ -31,7 +31,9 @@ def capture_screenshots(results: list[SearchResult], run_id: str) -> list[Screen
 
     captures: list[ScreenshotCapture] = []
     with sync_playwright() as p:
-        launch_kwargs = {"headless": True}
+        # `timeout=` bounds the browser LAUNCH itself, not covered by
+        # page.set_default_timeout() (page-level operations only).
+        launch_kwargs = {"headless": True, "timeout": _PAGE_DEFAULT_TIMEOUT_MS}
         if _CHROMIUM_EXECUTABLE_OVERRIDE:
             launch_kwargs["executable_path"] = _CHROMIUM_EXECUTABLE_OVERRIDE
         browser = p.chromium.launch(**launch_kwargs)
@@ -52,7 +54,16 @@ def _capture_one(browser, result: SearchResult, out_dir: Path, index: int) -> Sc
         page = browser.new_page()
         try:
             page.set_default_timeout(_PAGE_DEFAULT_TIMEOUT_MS)
-            page.goto(result.url, wait_until="load")
+            response = page.goto(result.url, wait_until="load")
+            # page.goto() does NOT raise on an HTTP error status (a 404
+            # still "loads" as far as Playwright is concerned) -- without
+            # this check a dead link gets screenshotted and sent to the
+            # vision model as if it were real content, wasting a call on
+            # an error page we already know isn't useful from the status
+            # code alone. Same bug class caught live in page_fetcher.py's
+            # equivalent fallback path.
+            if response is not None and response.status >= 400:
+                raise RuntimeError(f"HTTP {response.status}")
             page.screenshot(path=screenshot_path, full_page=True)
         finally:
             page.close()

@@ -70,8 +70,11 @@ services:
     depends_on:
       qdrant:
         condition: service_healthy
+      # mock_portal is only used by the dormant shipping-portal pipeline's
+      # own offline tests now (see planner.py) -- not health-blocking so
+      # the live search/fetch path can start without it being ready.
       mock_portal:
-        condition: service_healthy
+        condition: service_started
       langfuse:
         condition: service_started  # never health-blocking; tracing fails open
     env_file:
@@ -85,6 +88,14 @@ services:
     volumes:
       - ./data/runs:/data/runs
       - ./data/screenshots:/data/screenshots
+    healthcheck:
+      # /ready (not /health): readiness, not liveness -- fails while Qdrant
+      # is unreachable, matching this service's actual ability to do its job.
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=5)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
 
   agents-synthesizer:
     build:
@@ -104,6 +115,15 @@ services:
       RUN_STORE_DIR: /data/runs
     volumes:
       - ./data/runs:/data/runs
+    healthcheck:
+      # This service is a bare polling loop, not an HTTP server -- checks
+      # the heartbeat file watcher.py writes every poll iteration is
+      # recent, rather than a request/response check. See watcher.py.
+      test: ["CMD-SHELL", "python -c \"import json,time; d=json.load(open('/data/runs/_synthesizer_heartbeat.json')); assert time.time() - d['last_poll_at'] < 30\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
 
 volumes:
   qdrant_storage:
