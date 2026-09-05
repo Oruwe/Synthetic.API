@@ -12,11 +12,15 @@ dependencies = [
     "fastembed>=0.3.6",
     "playwright>=1.47",
     "structlog>=24.4",
-    "langfuse>=2.50",
+    # Pinned to the 2.x client: matches the langfuse/langfuse:2 server image
+    # in docker-compose.yml. langfuse>=3 replaced the .trace()/.generation()
+    # API used in langfuse_tracer.py with an OTel-based one and targets the
+    # v3 server (ClickHouse+Redis+S3) we deliberately avoided for this timeline.
+    "langfuse>=2.50,<3",
     "networkx>=3.3",
     "httpx>=0.27",
     "python-dotenv>=1.0.1",
-    "anthropic>=0.40",
+    "openai>=1.50",
 ]
 
 [tool.uv]

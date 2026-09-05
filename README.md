@@ -45,6 +45,14 @@ independently and wakes up when new matching points appear. That's the
 asynchronous, shared-memory coordination the hackathon brief asks for,
 not a disguised function call.
 
+**Open-source by design, not just by license:** the fallback LLM path
+(`agents/common/lyzr_wrapper.py`) calls an **open-weight model
+(DeepSeek V3) via [OpenRouter](https://openrouter.ai)**, not a closed
+API — one key, swappable model, no vendor lock-in on the "brain" itself.
+Change `OPENROUTER_MODEL` in `.env` to point at whatever currently tops
+[OpenRouter's open-weight rankings](https://openrouter.ai/rankings) with
+zero code changes.
+
 ## Why this is defensible as "production-grade," not just a demo
 
 - **The DAG plan is real data** (`agents/common/models/dag.py`), executed by
@@ -115,7 +123,7 @@ docs/architecture.mmd source of the diagram above
 ## Running it
 
 ```bash
-cp .env.example .env    # fill in LYZR_API_KEY / LLM_FALLBACK_API_KEY, Langfuse keys, etc.
+cp .env.example .env    # fill in LYZR_API_KEY / OPENROUTER_API_KEY, Langfuse keys, etc.
 docker compose up --build
 ```
 
@@ -157,8 +165,9 @@ hackathon's official starter kit rather than guessed:
 
 - `agents/common/lyzr_wrapper.py` — the real Lyzr Agent SDK call
   (`LyzrBackend.complete`) is stubbed with a clear `NotImplementedError`
-  and falls back to a direct Anthropic API call so the pipeline still runs
-  end-to-end without it wired.
+  and falls back to an **open-weight model via OpenRouter** (default:
+  DeepSeek V3) so the pipeline still runs end-to-end without Lyzr wired,
+  and without depending on a closed-source API either.
 - `agents/orchestrator/omi_webhook.py` — accepts a couple of plausible Omi
   payload shapes; `parse_omi_payload` is the only place that needs to
   change once the real webhook contract is confirmed.

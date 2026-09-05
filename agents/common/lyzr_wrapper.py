@@ -12,6 +12,11 @@ Why a fallback: with ~3 days and unconfirmed SDK details, the pipeline
 must not be dead in the water if `LYZR_ENABLED=false` (no key yet) or if
 the real SDK call raises. The fallback goes through Langfuse tracing the
 same as the primary path, so observability isn't lost either way.
+
+The fallback deliberately calls an OPEN-WEIGHT model via OpenRouter
+(https://openrouter.ai) rather than a closed-source API — this project's
+own "brain" is swappable, inspectable, and not locked to one vendor,
+which matters for the open-source story as much as the code being public.
 """
 
 from abc import ABC, abstractmethod
@@ -46,27 +51,46 @@ class LyzrBackend(LLMBackend):
         )
 
 
-class DirectLLMFallbackBackend(LLMBackend):
-    """Calls an LLM directly (e.g. via the anthropic SDK) when Lyzr is
-    disabled or fails. Kept intentionally minimal — this is a safety net,
-    not the primary code path."""
+class OpenRouterBackend(LLMBackend):
+    """Calls an open-weight model through OpenRouter (one API key, many
+    open-source models) when Lyzr is disabled or fails. Kept intentionally
+    minimal — this is a safety net, not the primary code path.
+
+    Default model (`settings.openrouter_model`) is DeepSeek V3 — an
+    MIT-licensed, open-weight model that benchmarks at or near closed
+    frontier models on general reasoning/writing tasks, which is exactly
+    the kind of task (summary drafting, transcript classification) this
+    wrapper is used for. Swap it via OPENROUTER_MODEL in .env with no code
+    change; check https://openrouter.ai/rankings for whatever currently
+    tops the open-weight leaderboard before a demo, since new models ship
+    often. A ":free" suffix on the model id (e.g.
+    "deepseek/deepseek-chat-v3.1:free") uses OpenRouter's free tier.
+    """
 
     def complete(self, system_prompt: str, user_input: str) -> str:
-        if not settings.llm_fallback_api_key:
+        if not settings.openrouter_api_key:
             raise RuntimeError(
-                "No LYZR_API_KEY and no LLM_FALLBACK_API_KEY configured — "
+                "No LYZR_API_KEY and no OPENROUTER_API_KEY configured — "
                 "cannot complete an LLM call. Set one in .env."
             )
-        import anthropic
+        from openai import OpenAI
 
-        client = anthropic.Anthropic(api_key=settings.llm_fallback_api_key)
-        response = client.messages.create(
-            model=settings.llm_fallback_model,
+        client = OpenAI(api_key=settings.openrouter_api_key, base_url=settings.openrouter_base_url)
+        response = client.chat.completions.create(
+            model=settings.openrouter_model,
             max_tokens=1024,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_input}],
+            extra_headers={
+                # OpenRouter attribution headers (optional, but they're how
+                # OpenRouter's public rankings credit this app).
+                "HTTP-Referer": settings.openrouter_app_url,
+                "X-Title": settings.openrouter_app_name,
+            },
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_input},
+            ],
         )
-        return "".join(block.text for block in response.content if block.type == "text")
+        return response.choices[0].message.content or ""
 
 
 class LyzrAgentWrapper:
@@ -77,7 +101,7 @@ class LyzrAgentWrapper:
         self._primary: LLMBackend | None = (
             LyzrBackend(settings.lyzr_api_key, agent_role) if settings.lyzr_enabled else None
         )
-        self._fallback = DirectLLMFallbackBackend()
+        self._fallback = OpenRouterBackend()
 
     @traced_llm_call(name="lyzr_agent_call")
     def run(self, system_prompt: str, user_input: str, *, run_id: str, node_id: str) -> str:
