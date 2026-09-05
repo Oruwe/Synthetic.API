@@ -3,21 +3,25 @@ flowchart TD
 
     subgraph Lyzr Agent Swarm
         Orchestrator["Orchestrator\nplanner.py + executor.py\n(builds & runs DAGPlan)"]
-        WebNav["Web-Navigator\nportal_client.py + extractor.py\n(Playwright, deterministic DOM extraction)"]
-        Synth["Synthesizer\nwatcher.py + drafter.py\n(polls Qdrant, drafts summary)"]
+        WebNav["Web-Navigator\nshipping: portal_client.py + extractor.py\nresearch: searcher.py + screenshotter.py + vision_wrapper.py"]
+        Synth["Synthesizer\nwatcher.py + drafter.py\n(polls Qdrant, drafts response)"]
     end
 
     Portal[("Mock Legacy\nShipping Portal\n(Flask, no real API)")]
-    Qdrant[("Qdrant\nshared vector memory\ncollection: delayed_orders")]
-    Langfuse[("Langfuse\nLLM trace UI")]
+    OpenWeb[("Open Web\n(DuckDuckGo search + any site)")]
+    Qdrant[("Qdrant\ndelayed_orders + web_knowledge\ncollections")]
+    Langfuse[("Langfuse\nLLM + vision trace UI")]
     RunStore[("data/runs/*.json\nDAG run state")]
-    User["👤 Ops team\n(notified)"]
+    User["👤 User\n(notified)"]
 
-    Orchestrator -->|DAG: scrape → extract → embed| WebNav
+    Orchestrator -->|"DAG A: scrape → extract → embed"| WebNav
+    Orchestrator -->|"DAG B: search → screenshot → analyze → embed → curate"| WebNav
     WebNav -->|Playwright login + scrape| Portal
+    WebNav -->|search + screenshot| OpenWeb
     WebNav -->|"upsert(order, status=delayed)"| Qdrant
-    Synth -.->|"poll: new points where status=delayed\n(ASYNC — no direct call)"| Qdrant
-    Synth -->|drafted summary| User
+    WebNav -->|"upsert(finding, status=candidate)\nthen curate: promote or DELETE"| Qdrant
+    Synth -.->|"poll: status=delayed OR status=permanent\n(ASYNC — no direct call)"| Qdrant
+    Synth -->|drafted response| User
 
     Orchestrator -.->|node state on every transition| RunStore
     Orchestrator -.->|trace spans| Langfuse

@@ -93,3 +93,28 @@ def test_extract_orders_clean_row_has_no_flags():
     rows = [_raw_row()]
     result = extract_orders(rows, page_url="http://example.test/dashboard")
     assert result.orders[0].flags == []
+
+
+def test_one_malformed_row_is_skipped_without_discarding_valid_rows():
+    """Regression test: a bad row used to raise uncaught from extract_orders,
+    failing the whole extract_validate node and discarding every valid order
+    scraped in the same run along with it."""
+    rows = [
+        _raw_row(order_id="ORD-GOOD-1"),
+        _raw_row(order_id="ORD-BAD", expected_date="not-a-date"),
+        _raw_row(order_id="ORD-GOOD-2"),
+    ]
+    result = extract_orders(rows, page_url="http://example.test/dashboard")
+
+    assert result.extracted_count == 2
+    assert {o.order_id for o in result.orders} == {"ORD-GOOD-1", "ORD-GOOD-2"}
+    assert result.skipped_count == 1
+
+
+def test_missing_required_field_in_a_row_is_skipped_not_fatal():
+    rows = [_raw_row(order_id="ORD-GOOD")]
+    del rows[0]["customer_name"]  # simulates a DOM change dropping a cell
+    result = extract_orders(rows, page_url="http://example.test/dashboard")
+
+    assert result.extracted_count == 0
+    assert result.skipped_count == 1

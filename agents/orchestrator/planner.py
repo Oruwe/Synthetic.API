@@ -1,6 +1,16 @@
 """Transcript -> DAGPlan.
 
-Two layers, deliberately in this order:
+Two independent capabilities, checked in this order:
+
+0. Web research ("search the web for...", "look up...", "research...") ->
+   the search/screenshot/vision-analyze/embed/curate chain (see
+   web_navigator/research_handlers.py). Checked FIRST and only on an
+   explicit trigger phrase -- a bare question like "what's the weather
+   today?" deliberately stays `no_capability` rather than auto-triggering
+   a web search for anything ambiguous; the system acts, it doesn't guess.
+1. Shipping portal (checked below, existing behavior).
+
+Two layers within each capability, deliberately in this order:
 
 1. A deterministic, rule/keyword-based base parse. This alone is enough to
    build the standard 3-node plan (scrape -> extract -> embed) for the
@@ -19,6 +29,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 
+from agents.common.config import settings
 from agents.common.lyzr_wrapper import LyzrAgentWrapper
 from agents.common.models.dag import DAGEdge, DAGNode, DAGPlan, NodeType
 
@@ -35,6 +46,12 @@ _UNSUPPORTED_SUBINTENTS = {
 }
 _UNSUPPORTED_SYSTEMS = re.compile(r"\b(crm|erp|billing system|payroll)\b", re.I)
 
+_RESEARCH_QUERY_EXTRACT = re.compile(
+    r"\b(?:search(?: the web| online)? for|search(?: the web| online)?|look up|research|"
+    r"find information (?:about|on)|google)\b\s*(.*)",
+    re.I,
+)
+
 _orchestrator_agent = LyzrAgentWrapper(agent_role="orchestrator")
 
 
@@ -48,6 +65,11 @@ def build_plan(transcript: str, run_id: str | None = None) -> DAGPlan:
 
     run_id = run_id or str(uuid.uuid4())
     created_at = datetime.now(timezone.utc)
+
+    research_match = _RESEARCH_QUERY_EXTRACT.search(transcript)
+    if research_match:
+        query = research_match.group(1).strip(" .,!?") or transcript.strip()
+        return _research_plan(transcript, query, run_id, created_at)
 
     # Reject explicitly out-of-scope systems before matching on generic
     # "delayed" language, so "check the CRM for delayed leads" doesn't get
@@ -104,6 +126,64 @@ def build_plan(transcript: str, run_id: str | None = None) -> DAGPlan:
         edges=edges,
         status="planned",
         unsupported_subintents=unsupported,
+        circuit_breaker_threshold=settings.dag_circuit_breaker_threshold,
+    )
+
+
+def _research_plan(transcript: str, query: str, run_id: str, created_at: datetime) -> DAGPlan:
+    nodes = [
+        DAGNode(
+            id="search",
+            type=NodeType.SEARCH_WEB,
+            name="Search the web",
+            handler_key="search_web",
+            params={"query": query},
+        ),
+        DAGNode(
+            id="screenshot",
+            type=NodeType.CAPTURE_SCREENSHOTS,
+            name="Capture screenshots of top results",
+            handler_key="capture_screenshots",
+            depends_on=["search"],
+            timeout_seconds=60,  # visiting several real sites is slower than the mock portal
+        ),
+        DAGNode(
+            id="analyze",
+            type=NodeType.ANALYZE_SCREENSHOTS,
+            name="Analyze screenshots with an open-weight vision model",
+            handler_key="analyze_screenshots",
+            depends_on=["screenshot"],
+            timeout_seconds=60,
+        ),
+        DAGNode(
+            id="embed_candidates",
+            type=NodeType.EMBED_CANDIDATES,
+            name="Embed candidate findings in Qdrant",
+            handler_key="embed_candidates",
+            depends_on=["analyze"],
+        ),
+        DAGNode(
+            id="curate",
+            type=NodeType.CURATE_KNOWLEDGE,
+            name="Curate: keep relevant findings, delete the rest",
+            handler_key="curate_knowledge",
+            depends_on=["embed_candidates"],
+        ),
+    ]
+    edges = [
+        DAGEdge(from_node="search", to_node="screenshot"),
+        DAGEdge(from_node="screenshot", to_node="analyze"),
+        DAGEdge(from_node="analyze", to_node="embed_candidates"),
+        DAGEdge(from_node="embed_candidates", to_node="curate"),
+    ]
+    return DAGPlan(
+        run_id=run_id,
+        transcript=transcript,
+        created_at=created_at,
+        nodes=nodes,
+        edges=edges,
+        status="planned",
+        circuit_breaker_threshold=settings.dag_circuit_breaker_threshold,
     )
 
 
@@ -121,4 +201,5 @@ def _no_capability_plan(transcript: str, run_id: str, created_at: datetime) -> D
         nodes=[node],
         edges=[],
         status="no_capability",
+        circuit_breaker_threshold=settings.dag_circuit_breaker_threshold,
     )

@@ -23,6 +23,14 @@ _ORDER_ROW_SELECTOR = '[data-testid="order-row"]'
 # `playwright install --with-deps chromium` so this isn't needed there.
 _CHROMIUM_EXECUTABLE_OVERRIDE = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE")
 
+# Kept comfortably below the DAG node's own timeout_seconds (default 30s in
+# agents/common/models/dag.py) so a hung page raises *inside* this function
+# and the executor's per-node timeout / retry logic runs the common case --
+# a Python thread that's genuinely stuck cannot be force-stopped once
+# started (see executor.py's node_thread_possibly_orphaned log), so the
+# real mitigation is making that outcome rare, not handling it after the fact.
+_PAGE_DEFAULT_TIMEOUT_MS = 15_000
+
 
 def scrape_dashboard_rows() -> list[dict[str, str]]:
     with sync_playwright() as p:
@@ -32,6 +40,7 @@ def scrape_dashboard_rows() -> list[dict[str, str]]:
         browser = p.chromium.launch(**launch_kwargs)
         try:
             page = browser.new_page()
+            page.set_default_timeout(_PAGE_DEFAULT_TIMEOUT_MS)
             page.goto(f"{settings.portal_base_url}/login")
             page.fill('[data-testid="username-input"]', settings.portal_username)
             page.fill('[data-testid="password-input"]', settings.portal_password)

@@ -38,3 +38,7 @@ class ExtractionResult(BaseModel):
     page_url: str
     extracted_count: int
     guard_flags_total: int
+    # Rows that failed schema validation (bad/missing field) and were
+    # skipped individually rather than failing the whole extraction --
+    # see web_navigator/extractor.py.
+    skipped_count: int = 0

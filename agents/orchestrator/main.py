@@ -15,6 +15,7 @@ from agents.orchestrator import handlers as orchestrator_handlers  # noqa: F401 
 from agents.orchestrator import omi_webhook, planner
 from agents.orchestrator.executor import execute_plan
 from agents.web_navigator import handlers as web_navigator_handlers  # noqa: F401 - registers handlers
+from agents.web_navigator import research_handlers  # noqa: F401 - registers handlers
 
 configure_logging("orchestrator")
 logger = get_logger(component="orchestrator.main")

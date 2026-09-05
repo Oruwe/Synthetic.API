@@ -80,6 +80,48 @@ def traced_llm_call(name: str) -> Callable:
     return decorator
 
 
+def traced_vision_call(name: str) -> Callable:
+    """Like `traced_llm_call`, but for image+prompt -> text calls
+    (agents/common/vision_wrapper.py). The traced "input" is `image_ref` (a
+    file path or URL) rather than the actual image bytes -- tracing must
+    never balloon a trace with a multi-MB base64 payload."""
+
+    def decorator(fn: Callable) -> Callable:
+        @functools.wraps(fn)
+        def wrapper(self, image_ref: str, prompt: str, *, run_id: str, node_id: str):
+            client = _get_client()
+            started = time.monotonic()
+            trace = None
+            if client is not None:
+                try:
+                    trace = client.trace(name=name, session_id=run_id, metadata={"node_id": node_id})
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("langfuse_trace_start_failed", error=str(exc), run_id=run_id)
+
+            try:
+                result = fn(self, image_ref, prompt, run_id=run_id, node_id=node_id)
+            except Exception as exc:
+                if trace is not None:
+                    _safe(lambda: trace.update(output={"error": str(exc)}, level="ERROR"))
+                raise
+            else:
+                if trace is not None:
+                    latency_ms = (time.monotonic() - started) * 1000
+                    _safe(
+                        lambda: trace.generation(
+                            name=name,
+                            input={"image_ref": image_ref, "prompt": prompt},
+                            output=result,
+                            metadata={"latency_ms": latency_ms},
+                        )
+                    )
+                return result
+
+        return wrapper
+
+    return decorator
+
+
 def _safe(fn: Callable) -> None:
     try:
         fn()

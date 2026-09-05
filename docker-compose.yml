@@ -81,8 +81,10 @@ services:
       QDRANT_URL: http://qdrant:6333
       LANGFUSE_HOST: http://langfuse:3000
       RUN_STORE_DIR: /data/runs
+      SCREENSHOT_DIR: /data/screenshots
     volumes:
       - ./data/runs:/data/runs
+      - ./data/screenshots:/data/screenshots
 
   agents-synthesizer:
     build:

@@ -145,3 +145,46 @@ def test_plan_with_unknown_dependency_is_rejected():
     plan = _plan([_node("a", key, depends_on=["ghost"])])
     with pytest.raises(PlanValidationError):
         executor.execute_plan(plan)
+
+
+def test_default_circuit_breaker_threshold_trips_on_a_three_node_plan():
+    """Regression test: the default threshold used to be 5 while the only
+    plan the planner ever produces has 3 nodes, so the breaker could never
+    trip on a real run. It must be reachable with a small linear plan."""
+    key = f"fail_{uuid.uuid4().hex}"
+    executor.register_handler(key)(lambda node, ctx: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    plan = _plan([_node(f"n{i}", key, max_retries=1, retry_backoff_seconds=0) for i in range(3)])
+    # Uses the model default (not an explicit override) on purpose.
+    run = executor.execute_plan(plan)
+
+    assert run.overall_status == "circuit_broken"
+    assert run.node_states["n2"].status == NodeStatus.SKIPPED
+
+
+def test_no_capability_plan_runs_its_node_and_notifies(monkeypatch):
+    """Regression test: no_capability plans used to return before ever
+    executing their single node (dead handler) and never notified the user,
+    since such a plan never writes a Qdrant point for the Synthesizer to see."""
+    notified = {}
+    monkeypatch.setattr(
+        executor.notifier, "notify", lambda summary, run_id: notified.update(summary=summary, run_id=run_id)
+    )
+
+    clarify_node = DAGNode(
+        id="clarify",
+        type=NodeType.CLARIFY_UNSUPPORTED,
+        name="clarify",
+        handler_key="clarify_unsupported",
+    )
+    plan = _plan([clarify_node], status="no_capability")
+    # Ensure the real handler is registered (normally done by importing
+    # agents.orchestrator.handlers at app startup).
+    import agents.orchestrator.handlers  # noqa: F401
+
+    run = executor.execute_plan(plan)
+
+    assert run.overall_status == "no_capability"
+    assert run.node_states["clarify"].status == NodeStatus.SUCCEEDED
+    assert notified.get("run_id") == plan.run_id
+    assert "test transcript" in notified.get("summary", "")

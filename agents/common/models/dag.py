@@ -17,6 +17,12 @@ class NodeType(str, Enum):
     EXTRACT_VALIDATE = "extract_validate"
     EMBED_STORE = "embed_store"
     CLARIFY_UNSUPPORTED = "clarify_unsupported"
+    # Web-Researcher: search -> screenshot -> vision-analyze -> embed -> curate
+    SEARCH_WEB = "search_web"
+    CAPTURE_SCREENSHOTS = "capture_screenshots"
+    ANALYZE_SCREENSHOTS = "analyze_screenshots"
+    EMBED_CANDIDATES = "embed_candidates"
+    CURATE_KNOWLEDGE = "curate_knowledge"
 
 
 class DAGNode(BaseModel):
@@ -46,7 +52,10 @@ class DAGPlan(BaseModel):
     nodes: list[DAGNode] = Field(default_factory=list)
     edges: list[DAGEdge] = Field(default_factory=list)
     status: PlanStatus = "planned"
-    circuit_breaker_threshold: int = 5
+    # Callers should pass settings.dag_circuit_breaker_threshold explicitly
+    # (see orchestrator/planner.py) -- this default only applies if a plan
+    # is constructed without going through the planner (e.g. in a test).
+    circuit_breaker_threshold: int = 2
     unsupported_subintents: list[str] = Field(default_factory=list)
 
 

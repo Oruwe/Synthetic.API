@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 import networkx as nx
 
-from agents.common import run_store
+from agents.common import notifier, run_store
 from agents.common.logging import bind_run_context, clear_run_context, get_logger
 from agents.common.models.dag import (
     DAGNode,
@@ -71,8 +71,24 @@ def execute_plan(plan: DAGPlan) -> RunState:
     bind_run_context(run_id=plan.run_id)
     try:
         if plan.status == "no_capability":
+            # Actually run the single clarify node (previously this branch
+            # returned before ever executing it, leaving the handler dead
+            # code) AND notify synchronously: a no_capability plan never
+            # writes a Qdrant point, so the Synthesizer's poll loop would
+            # never see it -- without this, the user gets silence instead
+            # of an answer when they ask for something unsupported.
             run = run_store.create_run(plan)
-            logger.info("plan_no_capability", transcript=plan.transcript)
+            ctx = RunContext(run_id=plan.run_id)
+            _run_node_with_retry(run, plan.nodes[0], ctx)
+            run.overall_status = "no_capability"
+            run_store.save_run(run)
+            notifier.notify(
+                f'I couldn\'t find a supported action for: "{plan.transcript}". '
+                "Supported right now: checking the shipping portal for delayed orders, "
+                "and web research queries.",
+                plan.run_id,
+            )
+            logger.info("plan_no_capability_notified", transcript=plan.transcript)
             return run
 
         graph = _build_graph(plan)
@@ -139,9 +155,25 @@ def _run_node_with_retry(run: RunState, node: DAGNode, ctx: RunContext) -> None:
         try:
             result = future.result(timeout=node.timeout_seconds)
         except FutureTimeoutError:
-            future.cancel()
+            future.cancel()  # no-op if the thread already started -- see note below
             error = f"timed out after {node.timeout_seconds}s"
             logger.warning("node_attempt_timeout", attempt=attempt, error=error)
+            # HONEST LIMITATION, not a fix: concurrent.futures cannot force-
+            # stop a thread that's already running (`cancel()` only works
+            # before it starts). If the handler is truly hung (e.g. Playwright
+            # stuck on a network call) rather than merely slow, the original
+            # thread keeps running in the background after we've moved on and
+            # marked this attempt failed -- it can eventually succeed/fail on
+            # its own and leak a thread-pool slot (and possibly a live
+            # browser process) until it does. Mitigated in portal_client.py
+            # via tighter Playwright-level timeouts so most real hangs raise
+            # from *inside* the handler well before this outer timeout fires;
+            # this counter makes the residual risk observable rather than silent.
+            logger.error(
+                "node_thread_possibly_orphaned",
+                attempt=attempt,
+                detail="outer timeout fired; the underlying thread may still be running",
+            )
         except Exception as exc:  # noqa: BLE001 - a handler failure must not crash the executor
             error = str(exc)
             logger.warning("node_attempt_failed", attempt=attempt, error=error)

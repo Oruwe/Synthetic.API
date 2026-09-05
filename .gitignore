@@ -9,6 +9,8 @@ build/
 .ruff_cache/
 data/runs/*.json
 !data/runs/.gitkeep
+data/screenshots/*
+!data/screenshots/.gitkeep
 qdrant_storage/
 langfuse_storage/
 postgres_data/
