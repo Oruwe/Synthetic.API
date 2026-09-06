@@ -527,6 +527,7 @@ def _scroll_all_matching(
     scroll_filter: qm.Filter,
     seen_point_ids: set[str] | None,
     with_vectors: bool = False,
+    client: QdrantClient | None = None,
 ) -> list[qm.Record]:
     """Walks every page of a scroll query via Qdrant's `next_page_offset`
     cursor rather than reading a single page: a single unpaginated page
@@ -538,8 +539,19 @@ def _scroll_all_matching(
     curate_candidates, which needs the full candidate set for a run);
     a set filters out already-seen points (used by the two watch-for-new
     functions above).
+
+    `client` defaults to the shared global client (get_client()) -- every
+    caller except prune_stale_workflows relies on that default. Found as
+    a real bug via live testing against an injected Qdrant client, not
+    just by reading the code: prune_stale_workflows accepted its own
+    `client` argument and even passed it to ensure_collection, but this
+    helper silently ignored it and fell back to the (possibly
+    unreachable, e.g. in a test or a differently-configured caller)
+    global client anyway -- an injected client that only got HALF-honored
+    is worse than no injection support at all, since it looks correct
+    right up until it silently isn't.
     """
-    client = get_client()
+    client = client or get_client()
     ensure_collection(collection_name, client)
 
     matched: list[qm.Record] = []
@@ -705,7 +717,7 @@ def record_workflow_outcome(workflow: ActionWorkflow, client: QdrantClient | Non
 
 
 def find_workflow_memory(
-    intent: str, start_url: str | None = None, min_score: float | None = None
+    intent: str, start_url: str | None = None, min_score: float | None = None, client: QdrantClient | None = None
 ) -> WorkflowMemory | None:
     """Semantic search for a WorkflowMemory trustworthy enough to replay
     outright. Gated on THREE independent conditions, ALL of which must
@@ -730,7 +742,7 @@ def find_workflow_memory(
     """
     min_score = min_score if min_score is not None else settings.action_workflow_replay_min_score
     try:
-        client = get_client()
+        client = client or get_client()
         ensure_collection(settings.qdrant_action_workflows_collection, client)
         query_vector = embed_text(intent)
         query_filter = None
@@ -776,7 +788,9 @@ def prune_stale_workflows(max_age_hours: float | None = None, client: QdrantClie
         client = client or get_client()
         ensure_collection(settings.qdrant_action_workflows_collection, client)
         old_filter = qm.Filter(must=[qm.FieldCondition(key="last_used_at", range=qm.DatetimeRange(lt=cutoff))])
-        old_points = _scroll_all_matching(settings.qdrant_action_workflows_collection, old_filter, seen_point_ids=None)
+        old_points = _scroll_all_matching(
+            settings.qdrant_action_workflows_collection, old_filter, seen_point_ids=None, client=client
+        )
         stale_ids = []
         for point in old_points:
             memory = WorkflowMemory.model_validate(point.payload or {})

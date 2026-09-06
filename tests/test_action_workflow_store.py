@@ -323,6 +323,32 @@ def test_find_workflow_memory_without_start_url_skips_the_domain_filter(monkeypa
     assert client.query_points_calls[0]["query_filter"] is None
 
 
+def test_find_workflow_memory_honors_an_explicitly_injected_client(monkeypatch):
+    """Regression test for a real bug found via live testing against an
+    actual embedded Qdrant instance: find_workflow_memory used to ignore
+    any injected `client` entirely and always call the module-global
+    get_client() instead -- silently falling back to a client the caller
+    never asked for (in the live case, an unreachable one). Proven here
+    by making the GLOBAL client always fail while the INJECTED one
+    succeeds -- this only passes if the injected client is what actually
+    gets used."""
+
+    class AlwaysBrokenClient(FakeClient):
+        def query_points(self, **kwargs):
+            raise RuntimeError("the wrong client got used")
+
+    monkeypatch.setattr(qdrant_store, "_client", AlwaysBrokenClient())
+    monkeypatch.setattr(qdrant_store, "embed_text", lambda text: [1.0, 0.0])
+
+    fake_point = SimpleNamespace(score=0.92, payload=_memory_payload())
+    injected_client = FakeClient(query_points_result=SimpleNamespace(points=[fake_point]))
+
+    result = qdrant_store.find_workflow_memory("find the cheapest flight to Goa", client=injected_client)
+
+    assert result is not None
+    assert injected_client.query_points_calls  # the injected client, not the broken global one, was used
+
+
 # --- _canonical_key / _domain_of -------------------------------------------
 
 
@@ -359,6 +385,36 @@ def test_prune_stale_workflows_deletes_old_untrusted_records(monkeypatch):
 
     assert deleted == 1
     assert client.delete_calls[0]["points_selector"].points == ["point-a"]
+
+
+def test_prune_stale_workflows_honors_an_explicitly_injected_client(monkeypatch):
+    """Regression test for a real bug found via live testing against an
+    actual embedded Qdrant instance: prune_stale_workflows accepted a
+    `client` argument and even passed it to ensure_collection with it,
+    but its internal _scroll_all_matching() call silently ignored that
+    same client and fell back to the module-global get_client() instead --
+    an injected client that's only HALF-honored is worse than none at
+    all, since it looks correct right up until it silently isn't. The
+    prior version of this test used the SAME client object for both the
+    injected param and the monkeypatched global, which masked exactly
+    this bug -- this one uses two DIFFERENT instances so a fallback to
+    the wrong one is actually observable."""
+
+    class AlwaysBrokenClient(FakeClient):
+        def scroll(self, **kwargs):
+            raise RuntimeError("the wrong client got used")
+
+    monkeypatch.setattr(qdrant_store, "_client", AlwaysBrokenClient())
+
+    old_untrusted = _memory_payload(
+        canonical_key="a", success_count=0, failure_count=3, last_used_at=datetime.now(timezone.utc) - timedelta(days=30)
+    )
+    injected_client = FakeClient(existing_points={"point-a": old_untrusted})
+
+    deleted = qdrant_store.prune_stale_workflows(max_age_hours=24, client=injected_client)
+
+    assert deleted == 1
+    assert injected_client.delete_calls  # the injected client, not the broken global one, was used
 
 
 def test_prune_stale_workflows_never_deletes_a_trusted_record_regardless_of_age(monkeypatch):
