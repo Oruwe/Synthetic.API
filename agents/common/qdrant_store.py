@@ -248,6 +248,16 @@ def upsert_page_chunks(page: FetchedPage, question: str, run_id: str, client: Qd
     A page with `error` set (fetch failed) or empty text is a no-op: there's
     nothing to embed, and the caller (page_handlers.py) already logs the
     failure -- this function doesn't need to re-raise or re-log it.
+
+    Embeds and upserts the whole page's chunks in ONE call each, not one
+    per chunk. Caught live: a real Wikipedia-length article chunks into
+    50-100+ pieces, and the previous version did one embed() call plus one
+    separate network round-trip to Qdrant PER CHUNK -- fully serial, so 5
+    real fetched pages took long enough (worse on virtualized/WSL2 Docker
+    networking) to exhaust embed_pages' 60s node timeout on all 3 retries.
+    fastembed batches a list far more efficiently than N single-item calls
+    in one ONNX inference session, and one qdrant upsert() with all of a
+    page's points removes N-1 network round-trips outright.
     """
     if page.error is not None or not page.text.strip():
         return []
@@ -256,31 +266,35 @@ def upsert_page_chunks(page: FetchedPage, question: str, run_id: str, client: Qd
     ensure_collection(settings.qdrant_pages_collection, client)
 
     chunks = chunk_text(page.text)
+    if not chunks:
+        return []
+
+    vectors = [vector.tolist() for vector in get_embedder().embed(chunks)]
+
     point_ids: list[str] = []
-    for i, chunk in enumerate(chunks):
+    points: list[qm.PointStruct] = []
+    for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
         point_key = f"{run_id}:{page.url}:{i}"
-        vector = embed_text(chunk)
-        client.upsert(
-            collection_name=settings.qdrant_pages_collection,
-            points=[
-                qm.PointStruct(
-                    id=_stable_uuid(point_key),
-                    vector=vector,
-                    payload={
-                        "run_id": run_id,
-                        "question": question,
-                        "url": page.url,
-                        "title": page.title,
-                        "text": chunk,
-                        "chunk_index": i,
-                        "fetch_method": page.fetch_method,
-                        "timestamp": page.timestamp.isoformat(),
-                        "point_key": point_key,
-                    },
-                )
-            ],
+        points.append(
+            qm.PointStruct(
+                id=_stable_uuid(point_key),
+                vector=vector,
+                payload={
+                    "run_id": run_id,
+                    "question": question,
+                    "url": page.url,
+                    "title": page.title,
+                    "text": chunk,
+                    "chunk_index": i,
+                    "fetch_method": page.fetch_method,
+                    "timestamp": page.timestamp.isoformat(),
+                    "point_key": point_key,
+                },
+            )
         )
         point_ids.append(point_key)
+
+    client.upsert(collection_name=settings.qdrant_pages_collection, points=points)
     return point_ids
 
 

@@ -180,6 +180,14 @@ reasoned about:
   raises on the resulting download event) — fixed with a dedicated
   `pypdf`-based extraction path, tried whenever a URL looks like a PDF or
   the server's `Content-Type` says so.
+- **`embed_pages` exhausted its 60s timeout on all 3 retries against real
+  content.** Caught on the first real `docker compose up` run against 5
+  live pages, one a full Wikipedia article: `upsert_page_chunks()` did one
+  `embed()` call AND one separate Qdrant network round-trip PER CHUNK
+  (50-100+ chunks for a page that size), fully serial. Fixed by batching
+  both — one `get_embedder().embed(chunks)` call and one `qdrant.upsert()`
+  call per page — plus a 180s node timeout as a safety margin on top of
+  that fix, not a substitute for it.
 
 ## What's dormant (kept, not deleted, not live)
 

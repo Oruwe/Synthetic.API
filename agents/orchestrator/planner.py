@@ -64,7 +64,15 @@ def build_plan(transcript: str, run_id: str | None = None) -> DAGPlan:
             name="Chunk and embed fetched pages",
             handler_key="embed_pages",
             depends_on=["fetch"],
-            timeout_seconds=60,
+            # 60s was too tight for real content: caught live, embedding 5
+            # real fetched pages (one a full Wikipedia article -> 50-100+
+            # chunks) exhausted all 3 retries at exactly 60s each before
+            # qdrant_store.upsert_page_chunks() was batched (one embed()
+            # and one qdrant upsert() per page instead of per chunk, see
+            # its docstring). 180s is a safety margin on top of that fix,
+            # not a substitute for it -- a slow/unbatched path would still
+            # time out eventually on a big enough page.
+            timeout_seconds=180,
         ),
     ]
     edges = [DAGEdge(from_node="fetch", to_node="embed")]

@@ -51,15 +51,35 @@ def _page(text="x" * 2000, error=None):
     )
 
 
-def test_upsert_page_chunks_embeds_and_upserts_each_chunk(monkeypatch):
-    monkeypatch.setattr(qdrant_store, "embed_text", lambda text: [1.0, 0.0])
+class _FakeVector:
+    """Mimics the numpy-array-like object fastembed's embed() yields --
+    upsert_page_chunks calls .tolist() on each one."""
+
+    def __init__(self, values):
+        self._values = values
+
+    def tolist(self):
+        return self._values
+
+
+class _FakeEmbedder:
+    def embed(self, texts):
+        return [_FakeVector([1.0, 0.0]) for _ in texts]
+
+
+def test_upsert_page_chunks_embeds_and_upserts_all_chunks_in_one_batch(monkeypatch):
+    # Batched, not one embed() + one qdrant upsert() round-trip per chunk --
+    # see upsert_page_chunks' docstring for why (caught live via a real
+    # Wikipedia-length page blowing through embed_pages' node timeout).
+    monkeypatch.setattr(qdrant_store, "get_embedder", lambda: _FakeEmbedder())
     client = FakeClient()
     monkeypatch.setattr(qdrant_store, "_client", client)
 
     point_ids = qdrant_store.upsert_page_chunks(_page(), question="q", run_id="run-1", client=client)
 
     assert len(point_ids) > 1  # 2000 chars at 800/chunk with overlap -> multiple chunks
-    assert len(client.upsert_calls) == len(point_ids)
+    assert len(client.upsert_calls) == 1  # one batched call, not one per chunk
+    assert len(client.upsert_calls[0]["points"]) == len(point_ids)
     first_payload = client.upsert_calls[0]["points"][0].payload
     assert first_payload["run_id"] == "run-1"
     assert first_payload["question"] == "q"
@@ -68,7 +88,7 @@ def test_upsert_page_chunks_embeds_and_upserts_each_chunk(monkeypatch):
 
 
 def test_upsert_page_chunks_is_a_noop_for_a_failed_fetch(monkeypatch):
-    monkeypatch.setattr(qdrant_store, "embed_text", lambda text: [1.0, 0.0])
+    monkeypatch.setattr(qdrant_store, "get_embedder", lambda: _FakeEmbedder())
     client = FakeClient()
     monkeypatch.setattr(qdrant_store, "_client", client)
 
@@ -79,7 +99,7 @@ def test_upsert_page_chunks_is_a_noop_for_a_failed_fetch(monkeypatch):
 
 
 def test_upsert_page_chunks_point_ids_are_idempotent_across_calls(monkeypatch):
-    monkeypatch.setattr(qdrant_store, "embed_text", lambda text: [1.0, 0.0])
+    monkeypatch.setattr(qdrant_store, "get_embedder", lambda: _FakeEmbedder())
     client = FakeClient()
     monkeypatch.setattr(qdrant_store, "_client", client)
 
