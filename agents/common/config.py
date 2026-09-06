@@ -38,9 +38,22 @@ class Settings(BaseSettings):
     # orchestrator/planner.py (previously this setting was unused/dead).
     dag_circuit_breaker_threshold: int = 2
 
-    # --- Lyzr (verify exact env var names against the hackathon starter kit) ---
+    # --- Lyzr ---
     lyzr_api_key: str = ""
     lyzr_enabled: bool = False
+    # Lyzr's model is a pre-created agent (persona/instructions set ONCE in
+    # Lyzr Studio, or via its Create Agent API), not a system prompt sent
+    # per call -- see lyzr_wrapper.py's LyzrBackend docstring. Create one
+    # agent in Lyzr Studio whose instructions match
+    # agents/synthesizer/drafter.py's _PAGE_SYSTEM_PROMPT (the live
+    # drafting call is the only caller this actually needs to work end to
+    # end today) and paste its agent_id here.
+    lyzr_agent_id: str = ""
+    # Lyzr's chat API requires a user_id; this project has no per-human-user
+    # concept (triggered by a transcript, not a login), so a fixed
+    # identifier is fine -- override only if your Lyzr account needs a
+    # specific format (e.g. an email).
+    lyzr_user_id: str = "synthetic-api"
 
     # --- LLM fallback used by lyzr_wrapper when Lyzr is disabled/unreachable ---
     # Routed through OpenRouter to an open-weight model (not a closed API) --

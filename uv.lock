@@ -965,6 +965,18 @@ wheels = [
 ]
 
 [[package]]
+name = "lyzr-python-sdk"
+version = "0.1.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/39/22/bd22f7ad24855dcfc0e45ce92b32f32966e0a7058896ef8e6b53517d8011/lyzr_python_sdk-0.1.5.tar.gz", hash = "sha256:01bd574135d592050fb8e2891cdcf901aff9cc99a1cc9b6b2b6e917b83501a45", size = 18765, upload-time = "2025-08-25T05:58:16.992Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e9/a0/71fc9735ab97a9f89821cba6ef34121b13517ab96eb22c4b84c3a4a767ac/lyzr_python_sdk-0.1.5-py3-none-any.whl", hash = "sha256:08ce0b13d3e34727904fef2c19a852de8667fd8f4e0ae438eda721c1328633fd", size = 19727, upload-time = "2025-08-25T05:58:15.557Z" },
+]
+
+[[package]]
 name = "mmh3"
 version = "5.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2036,6 +2048,7 @@ dependencies = [
     { name = "fastembed" },
     { name = "httpx" },
     { name = "langfuse" },
+    { name = "lyzr-python-sdk" },
     { name = "networkx" },
     { name = "openai" },
     { name = "playwright" },
@@ -2062,6 +2075,7 @@ requires-dist = [
     { name = "fastembed", specifier = ">=0.3.6" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "langfuse", specifier = ">=2.50,<3" },
+    { name = "lyzr-python-sdk", specifier = ">=0.1" },
     { name = "networkx", specifier = ">=3.3" },
     { name = "openai", specifier = ">=1.50" },
     { name = "playwright", specifier = ">=1.47" },

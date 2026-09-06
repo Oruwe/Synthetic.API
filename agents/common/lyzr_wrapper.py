@@ -1,17 +1,33 @@
 """Single isolation boundary for the Lyzr Agent SDK.
 
-TODO(verify against hackathon starter kit): the exact Lyzr SDK import,
-Agent constructor signature, and call method (`.run` / `.chat` /
-`.invoke`?) are NOT confirmed here — the starter kit distributed on the
-hackathon platform is the source of truth, and only this file should need
-to change once confirmed. Every other module calls `LyzrAgentWrapper.run`
-and does not know or care whether that ends up calling the real Lyzr SDK
-or the fallback path below.
+Verified against the public `lyzr-python-sdk` package (PyPI) and its
+GitHub README (github.com/LyzrCore/lyzr-python) -- import, client
+construction, agent creation, and the chat call's request shape are all
+confirmed there. ONE thing is NOT verifiable from outside a real Lyzr
+account: the exact shape of `client.inference.chat(...)`'s return value
+(the docs show the request but only `print(chat_response)` for the
+response, no field-by-field schema). See `_extract_chat_text()` below for
+how that's handled defensively rather than guessed at.
 
-Why a fallback: with ~3 days and unconfirmed SDK details, the pipeline
-must not be dead in the water if `LYZR_ENABLED=false` (no key yet) or if
-the real SDK call raises. The fallback goes through Langfuse tracing the
-same as the primary path, so observability isn't lost either way.
+The bigger thing worth understanding, not just verifying: Lyzr's model is
+architecturally different from a raw chat-completion API. There is no
+"pass a system prompt, get an answer" call -- an agent's persona/
+instructions are configured ONCE, either in the Lyzr Studio UI or via its
+Create Agent API, and you get back an `agent_id` you then send messages
+to. This project's own `complete(system_prompt, user_input)` contract
+predates that discovery (it was built to match OpenAI-compatible APIs,
+which OpenRouter's fallback below actually is) -- so `LyzrBackend` below
+receives a `system_prompt` on every call but cannot act on it; the
+prompt actually driving the real Lyzr agent's behavior lives in Lyzr
+Studio, on the agent `LYZR_AGENT_ID` points at. Keep that agent's
+instructions in sync with `agents/synthesizer/drafter.py`'s
+`_PAGE_SYSTEM_PROMPT` (the only live caller) by hand when one changes.
+
+Why a fallback regardless: `LYZR_ENABLED=false` (no key yet) or the real
+Lyzr call raising for any reason (rate limit, network, an account with no
+agent configured) must never take the whole pipeline down. The fallback
+goes through Langfuse tracing the same as the primary path, so
+observability isn't lost either way.
 
 The fallback deliberately calls an OPEN-WEIGHT model via OpenRouter
 (https://openrouter.ai) rather than a closed-source API — this project's
@@ -43,25 +59,90 @@ class LLMResult:
 
 class LLMBackend(ABC):
     @abstractmethod
-    def complete(self, system_prompt: str, user_input: str) -> LLMResult: ...
+    def complete(self, system_prompt: str, user_input: str, *, run_id: str | None = None) -> LLMResult: ...
+
+
+def _extract_chat_text(response) -> str:
+    """Pulls the answer text out of client.inference.chat()'s return value.
+
+    Not fully verifiable from outside a real Lyzr account (see module
+    docstring) -- the public docs show the request shape but never the
+    response schema, just `print(chat_response)`. The one concrete lead
+    found (a community writeup) used dict-style `response["response"]`,
+    consistent with the rest of this SDK's plain-dict style (the request
+    itself is a plain dict, not a typed object). Tried defensively, in
+    order, rather than assumed: dict key "response", then a few other
+    plausible dict keys, then an attribute of the same names, then --
+    rather than silently returning "" and looking like an empty answer --
+    str(response) as a last resort, with a warning logged so a real call's
+    actual shape shows up immediately in the logs instead of hiding a bug.
+    """
+    if isinstance(response, dict):
+        for key in ("response", "message", "content", "text"):
+            if key in response and response[key]:
+                return str(response[key])
+    else:
+        for attr in ("response", "message", "content", "text"):
+            value = getattr(response, attr, None)
+            if value:
+                return str(value)
+    logger.warning(
+        "lyzr_chat_response_shape_unrecognized",
+        response_type=type(response).__name__,
+        detail="none of response/message/content/text was found -- falling back to str(response); "
+        "check this against a real Lyzr account and adjust _extract_chat_text if it's wrong",
+    )
+    return str(response)
 
 
 class LyzrBackend(LLMBackend):
-    """TODO(verify): replace with the real Lyzr Agent SDK call once the
-    starter kit's exact API surface is confirmed. Keep the constructor and
-    `complete` signature stable so callers never need to change."""
+    """Real Lyzr Agent SDK call via the public `lyzr-python-sdk` package.
 
-    def __init__(self, api_key: str, agent_role: str):
+    See the module docstring for why `system_prompt` is accepted but not
+    used here: Lyzr's persona lives on the pre-created agent
+    (`agent_id`/`LYZR_AGENT_ID`), configured in Lyzr Studio, not passed
+    per call. `run_id` is threaded through as Lyzr's `session_id` so each
+    research run gets its own conversation thread on Lyzr's side too,
+    rather than every call sharing one anonymous session.
+    """
+
+    def __init__(self, api_key: str, agent_role: str, agent_id: str):
         self.api_key = api_key
         self.agent_role = agent_role
-        # TODO(verify): e.g. `from lyzr import Agent` / `LyzrAgentAPI(...)`
-        # and construct the real client here.
+        self.agent_id = agent_id
 
-    def complete(self, system_prompt: str, user_input: str) -> LLMResult:
-        raise NotImplementedError(
-            "Lyzr SDK call not wired yet — verify method names against the "
-            "hackathon starter kit, then implement here."
+    def complete(self, system_prompt: str, user_input: str, *, run_id: str | None = None) -> LLMResult:
+        if not self.agent_id:
+            raise RuntimeError(
+                "LYZR_ENABLED=true but LYZR_AGENT_ID is not set -- create an agent in Lyzr "
+                "Studio (instructions matching drafter.py's _PAGE_SYSTEM_PROMPT) and set its "
+                "agent_id in .env."
+            )
+        from lyzr_python_sdk import LyzrAgentAPI
+
+        client = LyzrAgentAPI(api_key=self.api_key)
+        response = client.inference.chat(
+            {
+                "user_id": settings.lyzr_user_id,
+                "agent_id": self.agent_id,
+                "message": user_input,
+                "session_id": run_id or "synthetic-api-default-session",
+            }
         )
+        text = _extract_chat_text(response)
+
+        # Opportunistic: use real token usage if this account/response
+        # shape happens to include it, same {"input","output","total"}
+        # shape OpenRouterBackend below produces -- otherwise Langfuse
+        # just shows no token count for this call rather than a fabricated
+        # one (see langfuse_tracer.py's _model_usage(), which already
+        # treats a missing/empty usage dict as "nothing to report").
+        usage = None
+        raw_usage = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+        if isinstance(raw_usage, dict) and any(k in raw_usage for k in ("input", "output", "total")):
+            usage = raw_usage
+
+        return LLMResult(text=text, model=f"lyzr:{self.agent_id}", usage=usage)
 
 
 class OpenRouterBackend(LLMBackend):
@@ -80,7 +161,10 @@ class OpenRouterBackend(LLMBackend):
     "deepseek/deepseek-chat-v3.1:free") uses OpenRouter's free tier.
     """
 
-    def complete(self, system_prompt: str, user_input: str) -> LLMResult:
+    def complete(self, system_prompt: str, user_input: str, *, run_id: str | None = None) -> LLMResult:
+        # run_id is unused here -- OpenRouter's chat-completions call is
+        # stateless per request (no server-side session concept to attach
+        # it to), unlike LyzrBackend.complete() above.
         if not settings.openrouter_api_key:
             raise RuntimeError(
                 "No LYZR_API_KEY and no OPENROUTER_API_KEY configured — "
@@ -120,7 +204,7 @@ class LyzrAgentWrapper:
     def __init__(self, agent_role: str):
         self.agent_role = agent_role
         self._primary: LLMBackend | None = (
-            LyzrBackend(settings.lyzr_api_key, agent_role) if settings.lyzr_enabled else None
+            LyzrBackend(settings.lyzr_api_key, agent_role, settings.lyzr_agent_id) if settings.lyzr_enabled else None
         )
         self._fallback = OpenRouterBackend()
         # Stashed by run() on every call so the @traced_llm_call decorator
@@ -135,11 +219,11 @@ class LyzrAgentWrapper:
     def run(self, system_prompt: str, user_input: str, *, run_id: str, node_id: str) -> str:
         if self._primary is not None:
             try:
-                result = self._primary.complete(system_prompt, user_input)
+                result = self._primary.complete(system_prompt, user_input, run_id=run_id)
                 self.last_model, self.last_usage = result.model, result.usage
                 return result.text
-            except Exception as exc:  # noqa: BLE001 - deliberately broad: never let an
-                # unconfirmed SDK failure take the whole pipeline down.
+            except Exception as exc:  # noqa: BLE001 - deliberately broad: never let a
+                # real Lyzr account/network hiccup take the whole pipeline down.
                 logger.warning(
                     "lyzr_primary_call_failed_falling_back",
                     run_id=run_id,
@@ -147,6 +231,6 @@ class LyzrAgentWrapper:
                     agent_role=self.agent_role,
                     error=str(exc),
                 )
-        result = self._fallback.complete(system_prompt, user_input)
+        result = self._fallback.complete(system_prompt, user_input, run_id=run_id)
         self.last_model, self.last_usage = result.model, result.usage
         return result.text

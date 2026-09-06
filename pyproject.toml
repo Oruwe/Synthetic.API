@@ -27,6 +27,10 @@ dependencies = [
     # (HTML-only) nor Playwright (a PDF response triggers a browser
     # download event and raises "Download is starting") can read one.
     "pypdf>=5.0",
+    # The real Lyzr Agent SDK -- see agents/common/lyzr_wrapper.py's
+    # LyzrBackend. Only imported (lazily, inside complete()) when
+    # LYZR_ENABLED=true; harmless to install unconditionally otherwise.
+    "lyzr-python-sdk>=0.1",
 ]
 
 [tool.uv]

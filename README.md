@@ -283,14 +283,15 @@ uv sync
 uv run pytest -q
 ```
 
-140 tests, fully offline (no Docker, no network, no API keys) — the DAG
+151 tests, fully offline (no Docker, no network, no API keys) — the DAG
 executor (including genuine multi-threaded concurrency, not simulated),
 chunking, the search/fetch/embed/retrieve pipeline (mocked at the I/O
 boundary), PDF extraction and its content-type/URL-extension detection,
-retention/pruning, readiness checks, the indexed watcher, and the
-Synthesizer persisting its drafted answer back onto the run are all
-exercised. The dormant pipelines' tests still run too (nothing about them
-broke).
+retention/pruning, readiness checks, the indexed watcher, the Synthesizer
+persisting its drafted answer back onto the run, and the real Lyzr SDK
+integration (its response-shape parsing, session_id threading, and
+fallback-on-failure behavior) are all exercised. The dormant pipelines'
+tests still run too (nothing about them broke).
 
 Plus 5 opt-in tests against a **real** local HTTP server and a **real**
 headless Chromium — no mocking of httpx, trafilatura, or Playwright:
@@ -307,10 +308,18 @@ with each other. It found a real bug the mocked suite couldn't (see
 
 ## Known integration gaps (flagged, not hidden)
 
-- `agents/common/lyzr_wrapper.py` — the real Lyzr Agent SDK call is
-  stubbed with a clear `NotImplementedError` and falls back to an
-  open-weight model via OpenRouter (default: DeepSeek V3), so the pipeline
-  runs end-to-end without Lyzr wired.
+- `agents/common/lyzr_wrapper.py` — wired to the real `lyzr-python-sdk`
+  (verified against its PyPI page and GitHub README), with one honest
+  caveat: Lyzr's agents carry their persona from a pre-created agent
+  (`LYZR_AGENT_ID`, configured once in Lyzr Studio) rather than a
+  per-call system prompt, and the exact shape of `client.inference.chat()`'s
+  *response* isn't documented publicly (only the request is) — handled
+  defensively (`_extract_chat_text()` tries several plausible shapes and
+  logs a clear warning if none match, rather than silently returning
+  nothing), and easy to correct once run once against a real account. Set
+  `LYZR_ENABLED=false` (the default) to skip it entirely; either way, a
+  call falls back to an open-weight model via OpenRouter (default:
+  DeepSeek V3) on any failure, so the pipeline always runs end-to-end.
 - `agents/orchestrator/omi_webhook.py` — accepts a couple of plausible Omi
   payload shapes; `parse_omi_payload` is the only place that needs to
   change once the real webhook contract is confirmed.
