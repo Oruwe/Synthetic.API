@@ -221,6 +221,19 @@ class LyzrAgentWrapper:
             try:
                 result = self._primary.complete(system_prompt, user_input, run_id=run_id)
                 self.last_model, self.last_usage = result.model, result.usage
+                # Without this, a successful real Lyzr call was completely
+                # silent -- only the failure path below logged anything,
+                # so "grep for lyzr in the logs" could never actually
+                # confirm success, only rule out one specific failure mode.
+                # Caught live: a real run drafted a real answer through
+                # Lyzr with zero log evidence of it having happened.
+                logger.info(
+                    "lyzr_primary_call_succeeded",
+                    run_id=run_id,
+                    node_id=node_id,
+                    agent_role=self.agent_role,
+                    model=result.model,
+                )
                 return result.text
             except Exception as exc:  # noqa: BLE001 - deliberately broad: never let a
                 # real Lyzr account/network hiccup take the whole pipeline down.

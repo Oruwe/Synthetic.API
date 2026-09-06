@@ -155,6 +155,36 @@ def test_complete_leaves_usage_none_when_absent(monkeypatch):
 # --- LyzrAgentWrapper: falls back to OpenRouter on any real failure ------
 
 
+def test_wrapper_logs_success_when_lyzr_call_succeeds(monkeypatch):
+    """A successful real Lyzr call used to be completely silent -- only the
+    fallback path logged anything, so "grep the logs for lyzr" could never
+    confirm success, only rule out one specific failure. Caught live: a
+    real run drafted a real answer through Lyzr with zero log evidence."""
+    monkeypatch.setattr(settings, "lyzr_enabled", True)
+    monkeypatch.setattr(settings, "lyzr_api_key", "key")
+    monkeypatch.setattr(settings, "lyzr_agent_id", "agent-123")
+    _patch_lyzr_client(monkeypatch, {"response": "the answer"})
+
+    logged = []
+
+    class _FakeLogger:
+        def info(self, event, **kwargs):
+            logged.append((event, kwargs))
+
+        def warning(self, event, **kwargs):
+            logged.append((event, kwargs))
+
+    monkeypatch.setattr(lyzr_wrapper, "logger", _FakeLogger())
+
+    wrapper = LyzrAgentWrapper(agent_role="synthesizer")
+    text = wrapper.run("system prompt", "question", run_id="run-1", node_id="draft_answer")
+
+    assert text == "the answer"
+    events = [event for event, _ in logged]
+    assert "lyzr_primary_call_succeeded" in events
+    assert "lyzr_primary_call_failed_falling_back" not in events
+
+
 def test_wrapper_falls_back_to_openrouter_when_lyzr_call_fails(monkeypatch):
     monkeypatch.setattr(settings, "lyzr_enabled", True)
     monkeypatch.setattr(settings, "lyzr_api_key", "key")
