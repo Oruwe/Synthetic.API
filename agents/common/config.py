@@ -57,6 +57,29 @@ class Settings(BaseSettings):
     # transient state, and a workflow that DOES stay trustworthy is never
     # deleted by this regardless of age.
     action_workflow_retention_hours: float = 24.0 * 14
+    # Cross-process lock backend for record_workflow_outcome's
+    # read-merge-write (see qdrant_store.py's _distributed_lock_for_workflow).
+    # Empty by default -- local dev/tests run entirely on the in-process
+    # lock (agents.common.qdrant_store._lock_for_workflow), which is
+    # already sufficient for a single orchestrator process/replica (the
+    # deployment this system runs as today). Set this only when the
+    # orchestrator is scaled to more than one process/replica, at which
+    # point the in-process lock alone can no longer prevent two replicas
+    # from losing an update to the same canonical workflow record.
+    redis_url: str = ""
+    # Generous vs. the actual critical section (one Qdrant retrieve, one
+    # local embed, one Qdrant upsert) -- long enough that a slow Qdrant
+    # round-trip doesn't expire the lock out from under its own holder,
+    # short enough that a holder that crashed mid-critical-section doesn't
+    # wedge the record for long.
+    redis_lock_ttl_ms: int = 10_000
+    # How long a caller will wait to acquire a contended lock before
+    # giving up and proceeding WITHOUT it (logged loudly when this
+    # happens) -- matches this codebase's fail-open discipline: a real
+    # browser action already happened in the physical world, so refusing
+    # to ever record it because a lock is contended is a worse outcome
+    # than a rare, logged, unprotected write.
+    redis_lock_acquire_timeout_seconds: float = 5.0
 
     # --- Run state ---
     run_store_dir: str = "/data/runs"

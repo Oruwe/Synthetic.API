@@ -31,6 +31,7 @@ dependencies = [
     # LyzrBackend. Only imported (lazily, inside complete()) when
     # LYZR_ENABLED=true; harmless to install unconditionally otherwise.
     "lyzr-python-sdk>=0.1",
+    "redis>=8.1.0",
 ]
 
 [tool.uv]

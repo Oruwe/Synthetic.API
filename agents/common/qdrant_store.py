@@ -21,7 +21,9 @@ and doesn't burn a limited hackathon LLM credit budget on every row/page/chunk.
 import math
 import re
 import threading
+import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
@@ -56,15 +58,16 @@ _embedder_lock = threading.Lock()
 # tasks completing at the same moment touch different Qdrant points and
 # have no reason to serialize behind each other.
 #
-# Known, accepted limitation: this protects the realistic concurrency
-# case for how this system actually runs today -- one orchestrator
-# process, node handlers racing inside its ThreadPoolExecutor (see
-# executor.py) -- NOT a future multi-replica orchestrator, which would
-# need cross-process coordination (e.g. Redis, or a real compare-and-set
-# primitive) this in-process dict can't provide. Qdrant itself has no
-# CAS/optimistic-locking primitive to lean on instead, so an in-process
-# lock is the honest fix for the deployment topology that exists, not a
-# pretend fix for one that doesn't.
+# This alone only protects one process (node handlers racing inside one
+# orchestrator's ThreadPoolExecutor, see executor.py) -- sufficient for
+# how this system runs today (one process, one replica), but NOT for a
+# scaled-out orchestrator with more than one process/replica, where two
+# instances could both pass this same-process lock and still race against
+# each other on the same Qdrant point. That cross-process case is what
+# _distributed_lock_for_workflow (below) closes via Redis when
+# settings.redis_url is configured; this in-process lock remains its
+# fallback (and the only thing used at all in local dev/tests, which run
+# with REDIS_URL unset) -- see that function's docstring.
 _workflow_memory_locks: dict[str, threading.Lock] = {}
 _workflow_memory_locks_meta_lock = threading.Lock()
 
@@ -75,6 +78,108 @@ def _lock_for_workflow(point_id: str) -> threading.Lock:
         with _workflow_memory_locks_meta_lock:
             lock = _workflow_memory_locks.setdefault(point_id, threading.Lock())
     return lock
+
+
+_redis_client = None  # type: ignore[var-annotated]  # "redis.Redis | None" -- untyped to keep redis import lazy
+_redis_client_lock = threading.Lock()
+
+# Released via a Lua script rather than a plain DEL so a caller can never
+# release a lock it doesn't actually hold anymore -- if this holder's TTL
+# already expired and a different caller acquired the key in the
+# meantime, blindly DELing would release THEIR lock out from under them.
+# The script is atomic (Redis runs it single-threaded), so the
+# check-then-delete itself can't race.
+_REDIS_RELEASE_LOCK_SCRIPT = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+else
+    return 0
+end
+"""
+
+
+def _get_redis_client():
+    """None when settings.redis_url is unset (the default -- local dev
+    and every existing test run entirely on the in-process lock above,
+    no Redis required) or when constructing the client fails. Double-
+    checked locking, same pattern as get_client()/get_embedder()."""
+    global _redis_client
+    if not settings.redis_url:
+        return None
+    if _redis_client is None:
+        with _redis_client_lock:
+            if _redis_client is None:
+                import redis as redis_lib
+
+                _redis_client = redis_lib.Redis.from_url(
+                    settings.redis_url, socket_timeout=2, socket_connect_timeout=2
+                )
+    return _redis_client
+
+
+@contextmanager
+def _distributed_lock_for_workflow(point_id: str):
+    """The cross-process half of record_workflow_outcome's concurrency
+    story. When settings.redis_url is configured, this is a real
+    distributed lock (SET NX PX, released only by a matching token via
+    the Lua script above) -- correct for a scaled-out orchestrator with
+    more than one process/replica, which the in-process lock alone cannot
+    protect (two different processes each pass their own in-process lock
+    and still race on the same Qdrant point).
+
+    Every failure mode here degrades rather than blocks the write,
+    matching this codebase's fail-open discipline everywhere else
+    (Tavily, Playwright, every other Qdrant call): Redis not configured,
+    Redis unreachable, and lock-acquisition timing out (another holder
+    has it) all fall through to either the in-process lock (same-process
+    safety only) or, as a last resort, no lock at all -- logged loudly,
+    since a real browser action already happened in the physical world
+    and refusing to ever record it because a lock is contended would be a
+    worse outcome than a rare, observable unprotected write.
+    """
+    client = _get_redis_client()
+    if client is None:
+        with _lock_for_workflow(point_id):
+            yield
+        return
+
+    lock_key = f"workflow_lock:{point_id}"
+    token = uuid.uuid4().hex
+    try:
+        acquired = _acquire_redis_lock(client, lock_key, token)
+    except Exception as exc:  # noqa: BLE001 - Redis being unreachable must degrade, not block the write
+        logger.warning("redis_lock_unreachable_falling_back_to_in_process_lock", point_id=point_id, error=str(exc))
+        with _lock_for_workflow(point_id):
+            yield
+        return
+
+    if not acquired:
+        logger.warning("redis_lock_acquire_timed_out_proceeding_without_a_lock", point_id=point_id)
+        yield
+        return
+
+    try:
+        yield
+    finally:
+        try:
+            client.eval(_REDIS_RELEASE_LOCK_SCRIPT, 1, lock_key, token)
+        except Exception as exc:  # noqa: BLE001 - a failed release just means the TTL expires it later
+            logger.warning("redis_lock_release_failed", point_id=point_id, error=str(exc))
+
+
+def _acquire_redis_lock(client, lock_key: str, token: str) -> bool:
+    """Spin-waits (short sleep, not a busy loop) for up to
+    settings.redis_lock_acquire_timeout_seconds -- contention here is
+    expected to be rare and short-lived (one Qdrant retrieve + one local
+    embed + one Qdrant upsert), so a simple poll is the right amount of
+    machinery, not a pub/sub wakeup scheme."""
+    deadline = time.monotonic() + settings.redis_lock_acquire_timeout_seconds
+    while True:
+        if client.set(lock_key, token, nx=True, px=settings.redis_lock_ttl_ms):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
 
 
 def get_client() -> QdrantClient:
@@ -520,9 +625,13 @@ def record_workflow_outcome(workflow: ActionWorkflow, client: QdrantClient | Non
     Qdrant point -- without serializing that critical section, the
     classic lost-update race applies (both read success_count=N, both
     write back N+1, one increment vanishes). Qdrant has no compare-and-set
-    primitive to lean on instead, so this is closed with an in-process
-    per-point lock (see `_lock_for_workflow` above and its docstring for
-    what this does and does not cover).
+    primitive to lean on instead, so this is closed with a lock around the
+    critical section: `_distributed_lock_for_workflow` (see its docstring)
+    uses Redis when settings.redis_url is configured (correct across
+    multiple orchestrator processes/replicas), falling back to the
+    in-process `_lock_for_workflow` otherwise -- which is also all that
+    local dev and every existing test run against, so this needs no Redis
+    to develop against or to verify offline.
 
     Never raises: a Qdrant outage here must not lose the fact that a real
     browser action already happened in the physical world, so the caller
@@ -555,7 +664,7 @@ def record_workflow_outcome(workflow: ActionWorkflow, client: QdrantClient | Non
 
     try:
         ensure_collection(settings.qdrant_action_workflows_collection, client)
-        with _lock_for_workflow(point_id):
+        with _distributed_lock_for_workflow(point_id):
             existing = _load_workflow_memory(client, point_id)
 
             if existing is None:

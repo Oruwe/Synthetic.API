@@ -25,6 +25,22 @@ services:
       timeout: 5s
       retries: 10
 
+  # --- Ambient RPA memory (feature/ambient-rpa-action-bridge only) --------
+  # Cross-process lock backend for qdrant_store.record_workflow_outcome's
+  # read-merge-write -- see that function and _distributed_lock_for_workflow
+  # for the full design. Deliberately never health-blocking on the agent
+  # services below (same posture as langfuse): this is a hardening layer
+  # for a scaled-out orchestrator, not a hard dependency for a single one,
+  # and qdrant_store falls back to an in-process lock (same-process safety
+  # only, logged) if this is unreachable at call time.
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   # --- Observability (Langfuse) -------------------------------------------
   # Single-Postgres Langfuse v2 image, deliberately NOT v3 (which needs
   # ClickHouse + Redis + S3 on top) -- too much infra for a 3-day solo build.
@@ -77,12 +93,15 @@ services:
         condition: service_started
       langfuse:
         condition: service_started  # never health-blocking; tracing fails open
+      redis:
+        condition: service_started  # never health-blocking; falls back to an in-process lock
     env_file:
       - .env
     environment:
       PORTAL_BASE_URL: http://mock_portal:5000
       QDRANT_URL: http://qdrant:6333
       LANGFUSE_HOST: http://langfuse:3000
+      REDIS_URL: redis://redis:6379/0
       RUN_STORE_DIR: /data/runs
       SCREENSHOT_DIR: /data/screenshots
     volumes:
