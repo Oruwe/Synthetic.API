@@ -42,6 +42,21 @@ class Settings(BaseSettings):
     # search result in the read-only research path, which just costs one
     # bad citation.
     action_workflow_replay_min_score: float = 0.85
+    # Two more independent trust gates on TOP of the similarity score
+    # above -- see qdrant_store.find_workflow_memory. A single lucky
+    # success is not enough to replay blind (min_success_count), and a
+    # workflow that has started failing more often than it succeeds
+    # (e.g. the target page got redesigned) must stop being offered even
+    # if it once scored perfectly (min_trust_ratio).
+    action_workflow_min_success_count: int = 1
+    action_workflow_min_trust_ratio: float = 0.6
+    # How long an UNTRUSTED workflow memory (never succeeded, or below
+    # min_trust_ratio) can sit unused before prune_stale_workflows sweeps
+    # it -- bounds the collection's growth. Deliberately much longer than
+    # RUN_RETENTION_HOURS: this is durable cross-run memory, not one run's
+    # transient state, and a workflow that DOES stay trustworthy is never
+    # deleted by this regardless of age.
+    action_workflow_retention_hours: float = 24.0 * 14
 
     # --- Run state ---
     run_store_dir: str = "/data/runs"

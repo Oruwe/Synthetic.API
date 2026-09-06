@@ -239,16 +239,20 @@ def test_loop_never_raises_on_a_browser_launch_failure(tmp_path, monkeypatch):
 def _prior_workflow(steps, start_url="https://example.test"):
     from datetime import datetime, timezone
 
-    from agents.common.models.action import ActionWorkflow
+    from agents.common.models.action import WorkflowMemory
 
-    return ActionWorkflow(
-        run_id="prior-run",
-        intent="book a table",
+    now = datetime.now(timezone.utc)
+    return WorkflowMemory(
+        canonical_key="example.test:book a table",
+        domain="example.test",
+        representative_intent="book a table",
         start_url=start_url,
         steps=steps,
-        success=True,
-        refused_reason=None,
-        created_at=datetime.now(timezone.utc),
+        success_count=3,
+        failure_count=0,
+        created_at=now,
+        last_used_at=now,
+        last_success_at=now,
     )
 
 

@@ -170,3 +170,24 @@ def test_prune_runs_only_every_n_polls(monkeypatch):
     watcher.poll_loop(lambda runs: None, interval_s=0, max_iterations=6)
 
     assert prune_calls["count"] == 2  # fires on iteration 3 and 6
+
+
+def test_prune_old_data_sweeps_the_action_workflow_memory_too(monkeypatch):
+    """Regression test: the ambient RPA action_workflows collection has
+    its own retention sweep (qdrant_store.prune_stale_workflows), but
+    nothing calls it periodically unless this poll loop -- the only
+    long-running process in the whole system -- does. Without this wired
+    in, prune_stale_workflows would be dead code and the collection would
+    grow forever."""
+    from agents.common import qdrant_store, run_store
+
+    monkeypatch.setattr(run_store, "prune_old_runs", lambda: 0)
+    monkeypatch.setattr(qdrant_store, "prune_old_page_chunks", lambda: 0)
+    workflow_prune_calls = {"count": 0}
+    monkeypatch.setattr(
+        qdrant_store, "prune_stale_workflows", lambda: workflow_prune_calls.__setitem__("count", 1) or 2
+    )
+
+    watcher._prune_old_data()
+
+    assert workflow_prune_calls["count"] == 1

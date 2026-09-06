@@ -201,12 +201,50 @@ typing through whatever page the intent points at.
 transcript → intent classifier (planner.py)
     ├── question → fetch_pages → embed_pages (unchanged, above)
     └── action   → execute_action (action_handlers.py)
-                       ├── Qdrant has a similar past SUCCESSFUL workflow?
+                       ├── Qdrant has a TRUSTED WorkflowMemory for this
+                       │      (domain, intent) pair? (similarity AND trust,
+                       │      not similarity alone -- see below)
                        │      → replay its recorded steps (no vision calls)
                        └── else → observe (screenshot) → decide (vision
-                                  model) → act (Playwright) → repeat,
-                                  recorded back into Qdrant either way
+                                  model) → act (Playwright) → repeat
+                       → either way, folded back into that SAME memory
+                         record (record_workflow_outcome): success
+                         reinforces trust and refreshes the replay
+                         target, failure erodes trust without losing a
+                         previously-verified good sequence
 ```
+
+**The memory layer is the part that makes this more than a demo trick.**
+The first version stored one Qdrant point per *run* — even the same task
+done successfully fifty times created fifty near-duplicate points, with
+no way for repeated success to build confidence or repeated failure to
+erode it. That's a log, not memory. The rebuild (`WorkflowMemory` in
+`agents/common/models/action.py`, `record_workflow_outcome`/
+`find_workflow_memory` in `qdrant_store.py`) keys one durable record per
+`(domain, canonicalized intent)` pair, updated in place on every attempt:
+
+- **Identity, not accumulation.** `_canonical_key(domain, intent)` hashes
+  to a stable point ID, so the *same* task on the *same* site always
+  updates one record instead of growing the collection per run.
+- **Trust is earned and can be lost.** `find_workflow_memory` gates a
+  replay on three independent conditions — similarity score, a minimum
+  number of verified successes, *and* a success/failure ratio floor — so
+  a workflow that broke after a page redesign stops being offered once
+  enough recent attempts have failed against it, with no human needing to
+  manually invalidate it.
+- **A success replaces the replay target; a failure never does.** Only a
+  verified success overwrites the stored step sequence — a failed replay
+  updates the trust counters but can't clobber a previously-good
+  sequence with an unverified one.
+- **Domain-scoped, not just semantically similar.** A fresh action always
+  knows its own candidate domain (from the planner's search), so a
+  semantically similar phrase for a genuinely different site can't
+  trigger a replay against the wrong page.
+- **Bounded growth.** `prune_stale_workflows` (swept periodically by the
+  Synthesizer's existing poll loop, same cadence as
+  `prune_old_page_chunks`/`prune_old_runs`) deletes records that are both
+  old *and* never earned trust — a record that stays trustworthy is never
+  deleted, no matter its age.
 
 Deliberately kept off `main` on its own branch (`feature/ambient-rpa-
 action-bridge`) so it can be discarded cleanly if it doesn't pan out —
@@ -230,14 +268,18 @@ lightly applied here.
   of defense, not the only one.
 - **Full audit trail.** Every step's screenshot is saved
   (`SCREENSHOT_DIR/<run_id>/action/`), and every attempt — successful,
-  refused, or stuck — is recorded as an `ActionWorkflow` in Qdrant's
-  `action_workflows` collection, so what the system actually did to a real
-  page is always inspectable after the fact, never just described.
-- **A safe, deterministic replay path stays conservative.** A prior
-  workflow only gets replayed outright above `ACTION_WORKFLOW_REPLAY_MIN_SCORE`
-  (default 0.85 cosine similarity, deliberately higher-bar than the
-  research path's top-k retrieval) — a wrong match here means executing
-  real clicks on the strength of a bad vector match, not just citing a
+  refused, or stuck — is folded into Qdrant's `action_workflows`
+  collection (see the memory layer above), so what the system actually
+  did to a real page is always inspectable after the fact, never just
+  described.
+- **A safe, deterministic replay path stays conservative.** A memory
+  only gets replayed outright once it clears similarity
+  (`ACTION_WORKFLOW_REPLAY_MIN_SCORE`, default 0.85 — deliberately a
+  higher bar than the research path's top-k retrieval), a minimum
+  verified-success count (`ACTION_WORKFLOW_MIN_SUCCESS_COUNT`), *and* a
+  trust-ratio floor (`ACTION_WORKFLOW_MIN_TRUST_RATIO`, default 0.6) —
+  three independent gates, because a wrong replay here means executing
+  real clicks on the strength of a bad match, not just citing a
   slightly-off source. Any failure partway through a replay (the page
   changed) falls back to a fresh live loop rather than leaving a page
   half-acted-on.

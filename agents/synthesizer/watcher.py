@@ -109,15 +109,26 @@ def poll_once(seen: set[str]) -> list[run_store.RunState]:
 
 
 def _prune_old_data() -> None:
-    """Bounds otherwise-unbounded growth of data/runs/*.json and the
-    web_pages Qdrant collection. Called every N polls (not every poll --
-    it's an O(all data) sweep), see settings.synthesizer_prune_every_n_polls.
+    """Bounds otherwise-unbounded growth of data/runs/*.json, the
+    web_pages Qdrant collection, and (feature/ambient-rpa-action-bridge)
+    the action_workflows memory collection. Called every N polls (not
+    every poll -- it's an O(all data) sweep), see
+    settings.synthesizer_prune_every_n_polls. The Synthesizer's poll loop
+    runs continuously regardless of which DAG shape produced a run, so
+    this is the natural place for every collection's retention sweep to
+    live, not just the ones the research path itself writes.
     """
     try:
         runs_pruned = run_store.prune_old_runs()
         chunks_pruned = qdrant_store.prune_old_page_chunks()
-        if runs_pruned or chunks_pruned:
-            logger.info("retention_sweep_completed", runs_pruned=runs_pruned, chunks_pruned=chunks_pruned)
+        workflows_pruned = qdrant_store.prune_stale_workflows()
+        if runs_pruned or chunks_pruned or workflows_pruned:
+            logger.info(
+                "retention_sweep_completed",
+                runs_pruned=runs_pruned,
+                chunks_pruned=chunks_pruned,
+                workflows_pruned=workflows_pruned,
+            )
     except Exception as exc:  # noqa: BLE001 - a failed sweep must not kill the poll loop
         logger.warning("retention_sweep_failed", error=str(exc))
 

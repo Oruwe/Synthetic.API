@@ -27,7 +27,7 @@ from pathlib import Path
 
 from agents.common.config import settings
 from agents.common.logging import get_logger
-from agents.common.models.action import ActionStep, ActionWorkflow
+from agents.common.models.action import ActionStep, ActionWorkflow, WorkflowMemory
 from agents.common.playwright_utils import PAGE_DEFAULT_TIMEOUT_MS, launched_browser
 from agents.common.vision_wrapper import decide_next_action
 
@@ -116,7 +116,7 @@ def execute_action_loop(intent: str, start_url: str, run_id: str, max_steps: int
     )
 
 
-def replay_workflow(prior: ActionWorkflow, run_id: str) -> ActionWorkflow:
+def replay_workflow(prior: WorkflowMemory, run_id: str) -> ActionWorkflow:
     """Deterministically re-executes a previously-successful workflow's
     recorded steps against a fresh page load -- no vision-model calls, so
     it's fast, costs no LLM budget, and leaves no room for a newly
@@ -158,7 +158,7 @@ def replay_workflow(prior: ActionWorkflow, run_id: str) -> ActionWorkflow:
                     )
                     return ActionWorkflow(
                         run_id=run_id,
-                        intent=prior.intent,
+                        intent=prior.representative_intent,
                         start_url=prior.start_url,
                         steps=executed,
                         success=False,
@@ -173,12 +173,12 @@ def replay_workflow(prior: ActionWorkflow, run_id: str) -> ActionWorkflow:
 
     except Exception as exc:  # noqa: BLE001 - a stale/broken replay must fall back to live exploration, not fail
         logger.warning("action_replay_failed_falling_back_to_live", run_id=run_id, error=str(exc))
-        return execute_action_loop(prior.intent, prior.start_url, run_id=run_id)
+        return execute_action_loop(prior.representative_intent, prior.start_url, run_id=run_id)
 
-    logger.info("action_replay_succeeded", run_id=run_id, prior_run_id=prior.run_id, step_count=len(executed))
+    logger.info("action_replay_succeeded", run_id=run_id, canonical_key=prior.canonical_key, step_count=len(executed))
     return ActionWorkflow(
         run_id=run_id,
-        intent=prior.intent,
+        intent=prior.representative_intent,
         start_url=prior.start_url,
         steps=executed,
         success=True,

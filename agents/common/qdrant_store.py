@@ -19,9 +19,11 @@ and doesn't burn a limited hackathon LLM credit budget on every row/page/chunk.
 """
 
 import math
+import re
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 from fastembed import TextEmbedding
 from qdrant_client import QdrantClient
@@ -31,7 +33,7 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 from agents.common.chunking import chunk_text
 from agents.common.config import settings
 from agents.common.logging import get_logger
-from agents.common.models.action import ActionWorkflow
+from agents.common.models.action import ActionWorkflow, WorkflowMemory
 from agents.common.models.orders import DelayedOrder
 from agents.common.models.page import FetchedPage
 from agents.common.models.research import VisionFinding
@@ -429,81 +431,214 @@ def _scroll_all_matching(
 
 
 # --- Ambient RPA action path (action_workflows collection) -----------------
+#
+# v1 of this collection (superseded) stored one point per RUN -- every
+# attempt of "the same" task created a new near-duplicate point, with no
+# way for repeated success to build trust or repeated failure to erode
+# it. This is the "engineer the memory" rebuild: ONE point per
+# (domain, canonicalized intent) pair, continuously updated in place, so
+# the memory actually gets more (or less) trustworthy over time instead
+# of just accumulating a log. See WorkflowMemory's own docstring
+# (agents/common/models/action.py) for the full design rationale.
 
 
-def upsert_action_workflow(workflow: ActionWorkflow, client: QdrantClient | None = None) -> str:
-    """Stores one attempted ActionWorkflow -- successful or not -- embedded
-    by its intent text. Persisted regardless of outcome: a failed/refused
-    attempt is still useful signal (find_similar_workflow below only
-    replays successful ones), and every attempt should be auditable.
+def _normalize_intent(intent: str) -> str:
+    """Collapses phrasing differences that shouldn't create a distinct
+    memory record ("Book a table!" vs "book a table") -- NOT a substitute
+    for semantic matching (find_workflow_memory below still does a real
+    vector search), just what makes the canonical key for the exact-ish
+    same request stable."""
+    text = re.sub(r"[^\w\s]", "", intent.strip().lower())
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _domain_of(url: str) -> str:
+    """Never raises: an unparseable start_url just means an empty domain,
+    which still lets a fresh record be created (matched only by intent
+    similarity going forward) rather than blocking the write."""
+    try:
+        netloc = urlparse(url).netloc.lower()
+        return netloc.removeprefix("www.") if netloc else netloc
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _canonical_key(domain: str, intent: str) -> str:
+    return f"{domain}:{_normalize_intent(intent)}"
+
+
+def _load_workflow_memory(client: QdrantClient, point_id: str) -> WorkflowMemory | None:
+    records = client.retrieve(
+        collection_name=settings.qdrant_action_workflows_collection, ids=[point_id], with_payload=True
+    )
+    if not records:
+        return None
+    return WorkflowMemory.model_validate(records[0].payload or {})
+
+
+def record_workflow_outcome(workflow: ActionWorkflow, client: QdrantClient | None = None) -> WorkflowMemory:
+    """The write side of ambient RPA's memory: folds one execution attempt
+    into the durable WorkflowMemory record for its (domain, intent) pair,
+    reinforcing an existing record in place rather than creating a new
+    near-duplicate point per run. A successful attempt replaces the
+    replay target (`steps`/`start_url`) with what it just verified works;
+    a failed attempt updates the trust counters but NEVER overwrites a
+    known-good step sequence with an unverified one -- so one bad attempt
+    against an otherwise-reliable workflow erodes its trust score without
+    destroying the thing that made it trustworthy in the first place.
+
     Never raises: a Qdrant outage here must not lose the fact that a real
-    browser action was already taken in the physical world, so the caller
-    (action_executor.py) logs the workflow either way and this failing is
-    a secondary, best-effort concern -- same fail-open discipline as
-    every other Qdrant write in this module.
+    browser action already happened in the physical world, so the caller
+    (action_handlers.py) has the workflow either way and persisting the
+    memory of it is a secondary, best-effort concern -- same fail-open
+    discipline as every other Qdrant write in this module. On failure,
+    returns a same-shaped, in-memory-only WorkflowMemory (not persisted)
+    so the caller never has to special-case a storage failure just to log
+    the outcome.
     """
     client = client or get_client()
-    point_id = f"{workflow.run_id}:{workflow.intent}"
+    now = datetime.now(timezone.utc)
+    domain = _domain_of(workflow.start_url)
+    key = _canonical_key(domain, workflow.intent)
+    point_id = _stable_uuid(key)
+
+    def _fresh_memory() -> WorkflowMemory:
+        return WorkflowMemory(
+            canonical_key=key,
+            domain=domain,
+            representative_intent=workflow.intent,
+            start_url=workflow.start_url,
+            steps=workflow.steps if workflow.success else [],
+            success_count=1 if workflow.success else 0,
+            failure_count=0 if workflow.success else 1,
+            created_at=now,
+            last_used_at=now,
+            last_success_at=now if workflow.success else None,
+        )
+
     try:
         ensure_collection(settings.qdrant_action_workflows_collection, client)
-        vector = embed_text(workflow.intent)
+        existing = _load_workflow_memory(client, point_id)
+
+        if existing is None:
+            memory = _fresh_memory()
+        else:
+            memory = existing.model_copy(
+                update={
+                    "last_used_at": now,
+                    "success_count": existing.success_count + (1 if workflow.success else 0),
+                    "failure_count": existing.failure_count + (0 if workflow.success else 1),
+                }
+            )
+            if workflow.success:
+                memory.steps = workflow.steps
+                memory.start_url = workflow.start_url
+                memory.last_success_at = now
+
+        vector = embed_text(memory.representative_intent)
         client.upsert(
             collection_name=settings.qdrant_action_workflows_collection,
-            points=[
-                qm.PointStruct(
-                    id=_stable_uuid(point_id),
-                    vector=vector,
-                    payload={
-                        "run_id": workflow.run_id,
-                        "intent": workflow.intent,
-                        "start_url": workflow.start_url,
-                        "steps": [s.model_dump(mode="json") for s in workflow.steps],
-                        "success": workflow.success,
-                        "refused_reason": workflow.refused_reason,
-                        "created_at": workflow.created_at.isoformat(),
-                        "point_key": point_id,
-                    },
-                )
-            ],
+            points=[qm.PointStruct(id=point_id, vector=vector, payload=memory.model_dump(mode="json"))],
         )
+        logger.info(
+            "workflow_memory_recorded",
+            canonical_key=key,
+            success_count=memory.success_count,
+            failure_count=memory.failure_count,
+            trust_ratio=round(memory.trust_ratio, 3),
+        )
+        return memory
     except Exception as exc:  # noqa: BLE001 - the real-world action already happened; storage is secondary
-        logger.warning("action_workflow_upsert_failed", run_id=workflow.run_id, error=str(exc))
-    return point_id
+        logger.warning("record_workflow_outcome_failed", intent=workflow.intent, error=str(exc))
+        return _fresh_memory()
 
 
-def find_similar_workflow(intent: str, min_score: float | None = None) -> ActionWorkflow | None:
-    """Semantic search for a past SUCCESSFUL workflow whose intent is close
-    enough to `intent` to trust replaying it outright. Deliberately more
-    conservative than semantic_search_pages' read-only top-k retrieval: a
-    wrong match here means executing real clicks/keystrokes on a real page
-    on the strength of a bad vector match, not just citing a slightly-off
-    source. Returns None (never raises) on any failure, an empty result,
-    or a best match below `min_score` -- all three mean "explore fresh,"
-    handled identically by the caller.
+def find_workflow_memory(
+    intent: str, start_url: str | None = None, min_score: float | None = None
+) -> WorkflowMemory | None:
+    """Semantic search for a WorkflowMemory trustworthy enough to replay
+    outright. Gated on THREE independent conditions, ALL of which must
+    hold -- similarity alone is not enough, since a wrong replay here
+    means executing real clicks/keystrokes on a real page, not just
+    citing a slightly-off source:
+      1. cosine similarity >= min_score (as before).
+      2. at least `settings.action_workflow_min_success_count` verified
+         successes -- one lucky run is not enough trust to replay blind.
+      3. a trust ratio (success/(success+failure)) >=
+         `settings.action_workflow_min_trust_ratio` -- a workflow that
+         broke after a page redesign stops being offered once enough
+         recent attempts against it have failed, with no human ever
+         needing to manually invalidate it.
+    When `start_url` is known (a fresh action always has a candidate
+    start_url from the planner's own search), the query is also filtered
+    to the SAME domain -- a semantically similar phrase for a different
+    site must never trigger a replay against the wrong page.
+
+    Returns None (never raises) on any failure or a non-qualifying best
+    match -- both mean "explore fresh," handled identically by the caller.
     """
     min_score = min_score if min_score is not None else settings.action_workflow_replay_min_score
     try:
         client = get_client()
         ensure_collection(settings.qdrant_action_workflows_collection, client)
         query_vector = embed_text(intent)
+        query_filter = None
+        if start_url:
+            domain = _domain_of(start_url)
+            if domain:
+                query_filter = qm.Filter(must=[qm.FieldCondition(key="domain", match=qm.MatchValue(value=domain))])
         response = client.query_points(
             collection_name=settings.qdrant_action_workflows_collection,
             query=query_vector,
-            query_filter=qm.Filter(must=[qm.FieldCondition(key="success", match=qm.MatchValue(value=True))]),
+            query_filter=query_filter,
             limit=1,
             with_payload=True,
         )
         if not response.points or response.points[0].score < min_score:
             return None
-        payload = dict(response.points[0].payload or {})
-        # "point_key" is a dedup/lookup field we stow on every payload in
-        # this module (see upsert_action_workflow above) -- it isn't part
-        # of the ActionWorkflow schema, and the model is extra="forbid", so
-        # it must be dropped before validating back into the model or this
-        # would raise on every real point and silently look identical to
-        # "no similar workflow found."
-        payload.pop("point_key", None)
-        return ActionWorkflow.model_validate(payload)
+        memory = WorkflowMemory.model_validate(response.points[0].payload or {})
+        if memory.success_count < settings.action_workflow_min_success_count:
+            return None
+        if memory.trust_ratio < settings.action_workflow_min_trust_ratio:
+            return None
+        return memory
     except Exception as exc:  # noqa: BLE001 - a lookup failure must fall through to fresh exploration, not crash
-        logger.warning("find_similar_workflow_failed", intent=intent, error=str(exc))
+        logger.warning("find_workflow_memory_failed", intent=intent, error=str(exc))
         return None
+
+
+def prune_stale_workflows(max_age_hours: float | None = None, client: QdrantClient | None = None) -> int:
+    """Deletes workflow memories that are both OLD (unused for
+    `max_age_hours`) AND untrustworthy (never succeeded, or a trust ratio
+    below `settings.action_workflow_min_trust_ratio`) -- bounds the
+    otherwise-unbounded growth of this collection without ever deleting a
+    record that's actively working, no matter how old it is. A workflow
+    with real trust built up is exactly the thing this memory exists to
+    keep; only the dead weight gets swept. Never raises: a Qdrant outage
+    here is logged and the sweep just does nothing this cycle, same
+    fail-open discipline as every other Qdrant call in this module.
+    """
+    max_age_hours = max_age_hours if max_age_hours is not None else settings.action_workflow_retention_hours
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+
+    try:
+        client = client or get_client()
+        ensure_collection(settings.qdrant_action_workflows_collection, client)
+        old_filter = qm.Filter(must=[qm.FieldCondition(key="last_used_at", range=qm.DatetimeRange(lt=cutoff))])
+        old_points = _scroll_all_matching(settings.qdrant_action_workflows_collection, old_filter, seen_point_ids=None)
+        stale_ids = []
+        for point in old_points:
+            memory = WorkflowMemory.model_validate(point.payload or {})
+            if memory.trust_ratio < settings.action_workflow_min_trust_ratio:
+                stale_ids.append(point.id)
+        if not stale_ids:
+            return 0
+        client.delete(
+            collection_name=settings.qdrant_action_workflows_collection,
+            points_selector=qm.PointIdsList(points=stale_ids),
+        )
+        logger.info("stale_workflows_pruned", count=len(stale_ids), max_age_hours=max_age_hours)
+        return len(stale_ids)
+    except Exception as exc:  # noqa: BLE001 - a pruning failure must not crash the caller
+        logger.warning("workflow_prune_failed", error=str(exc))
+        return 0
