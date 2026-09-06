@@ -4,7 +4,7 @@ rather than diffing Qdrant) and drafts + delivers a cited answer for each,
 retrieved via semantic search over that run's chunks.
 """
 
-from agents.common import notifier, qdrant_store
+from agents.common import notifier, qdrant_store, run_store
 from agents.common.logging import configure_logging, get_logger
 from agents.common.models.dag import RunState
 from agents.synthesizer import drafter, watcher
@@ -31,6 +31,20 @@ def _handle_completed_runs(runs: list[RunState]) -> None:
             sources_succeeded=sources_succeeded,
         )
         notifier.notify(answer, run.run_id)
+
+        # Persist the answer onto the run itself so GET /runs/{run_id} can
+        # hand it back directly -- previously the only place it appeared
+        # was this process's stdout/logs (see notifier.notify above).
+        # Best-effort: a save failure here must not re-raise and abort the
+        # notification that already succeeded above, and re-reading the
+        # run guards against overwriting a newer save from a concurrent
+        # writer (there isn't one today, but load-before-save costs nothing).
+        try:
+            fresh = run_store.load_run(run.run_id) or run
+            fresh.answer = answer
+            run_store.save_run(fresh)
+        except Exception as exc:  # noqa: BLE001 - the answer is already delivered via notify()
+            logger.warning("answer_persist_failed", run_id=run.run_id, error=str(exc))
 
 
 def main() -> None:

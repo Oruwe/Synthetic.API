@@ -22,6 +22,11 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "openai>=1.50",
     "trafilatura>=1.12",
+    # Pure-Python, no compiled/native deps -- keeps the agents image lean.
+    # Used only for the PDF branch in page_fetcher.py: neither trafilatura
+    # (HTML-only) nor Playwright (a PDF response triggers a browser
+    # download event and raises "Download is starting") can read one.
+    "pypdf>=5.0",
 ]
 
 [tool.uv]

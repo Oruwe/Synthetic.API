@@ -19,14 +19,28 @@ robots.txt is checked first (agents/web_navigator/robots.py), and a
 per-domain rate limit is applied (agents/web_navigator/rate_limiter.py) --
 neither is optional per-call, both fail open rather than block a
 legitimate fetch on their own hiccup.
+
+A third case, PDFs: Tavily search results occasionally point straight at a
+PDF (a government report, a spec sheet). Neither of the two paths above can
+read one -- trafilatura expects HTML, and Playwright's page.goto() on a PDF
+response triggers a browser *download* event rather than rendering it,
+which raises rather than returning content. So a PDF gets its own third
+path (pypdf, text extraction only -- no OCR, so a scanned/image-only PDF
+still comes back empty and isolated like any other failure), tried whenever
+either the URL itself looks like a PDF or the server says so via
+Content-Type, in preference to ever reaching the Playwright fallback for
+one.
 """
 
+import io
 import os
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import httpx
 import trafilatura
 from playwright.sync_api import sync_playwright
+from pypdf import PdfReader
 
 from agents.common.config import settings
 from agents.common.logging import get_logger
@@ -55,6 +69,10 @@ def fetch_pages(results: list[SearchResult], timeout_seconds: float | None = Non
     return pages
 
 
+def _looks_like_pdf_url(url: str) -> bool:
+    return urlparse(url).path.lower().endswith(".pdf")
+
+
 def _fetch_one(result: SearchResult, timeout_seconds: float) -> FetchedPage:
     if not robots.is_allowed(result.url):
         logger.info("fetch_skipped_disallowed_by_robots_txt", url=result.url)
@@ -66,6 +84,23 @@ def _fetch_one(result: SearchResult, timeout_seconds: float) -> FetchedPage:
             fetch_method="http",
             error="disallowed by robots.txt",
         )
+
+    if _looks_like_pdf_url(result.url):
+        # Go straight to the PDF path -- never try Playwright on a URL that
+        # already looks like a PDF, since that path's own goto() would just
+        # raise on the resulting download event.
+        try:
+            return _fetch_pdf(result, timeout_seconds)
+        except Exception as exc:  # noqa: BLE001 - one bad URL must not fail the whole batch
+            logger.warning("pdf_fetch_failed", url=result.url, error=str(exc))
+            return FetchedPage(
+                url=result.url,
+                title=result.title,
+                text="",
+                timestamp=datetime.now(timezone.utc),
+                fetch_method="pdf",
+                error=str(exc),
+            )
 
     try:
         page = _fetch_fast(result, timeout_seconds)
@@ -103,6 +138,16 @@ def _fetch_fast(result: SearchResult, timeout_seconds: float) -> FetchedPage | N
     )
     response.raise_for_status()
 
+    # Some PDFs don't end in ".pdf" (the URL check in _fetch_one only
+    # catches the obvious case) -- caught live: a Tavily result with no
+    # ".pdf" extension came back with this content-type and, before this
+    # check existed, silently failed both trafilatura (garbage binary text)
+    # and the Playwright fallback (raised on the download event) with no
+    # content ever extracted.
+    content_type = response.headers.get("content-type", "")
+    if "application/pdf" in content_type.lower():
+        return _extract_pdf_page(result, response.content)
+
     document = trafilatura.bare_extraction(response.text, with_metadata=True)
     text = (document.text if document and document.text else "").strip()
     if len(text.split()) < _MIN_ACCEPTABLE_WORD_COUNT:
@@ -115,6 +160,61 @@ def _fetch_fast(result: SearchResult, timeout_seconds: float) -> FetchedPage | N
         text=text,
         timestamp=datetime.now(timezone.utc),
         fetch_method="http",
+    )
+
+
+def _fetch_pdf(result: SearchResult, timeout_seconds: float) -> FetchedPage:
+    """For a URL that already looks like a PDF (see _looks_like_pdf_url) --
+    fetched directly rather than going through _fetch_fast, since there's
+    no HTML to try trafilatura on first."""
+    rate_limiter.throttle(result.url)
+    timeout = httpx.Timeout(timeout_seconds, connect=min(4.0, timeout_seconds))
+    response = httpx.get(
+        result.url,
+        timeout=timeout,
+        follow_redirects=True,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; SyntheticAPI-Researcher/1.0)"},
+    )
+    response.raise_for_status()
+    return _extract_pdf_page(result, response.content)
+
+
+def _extract_pdf_page(result: SearchResult, pdf_bytes: bytes) -> FetchedPage:
+    """Text-only extraction via pypdf -- no OCR, so a scanned/image-only
+    PDF still comes back with no usable text. Never raises: a
+    corrupt/encrypted/scanned PDF is reported via `error` exactly like any
+    other per-URL failure (see module docstring), and the caller must treat
+    whatever this returns as final -- never fall through to the Playwright
+    fallback for a confirmed PDF, since that path can't handle one either."""
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        text = "\n\n".join(page.extract_text() or "" for page in reader.pages).strip()
+    except Exception as exc:  # noqa: BLE001 - corrupt/encrypted PDF must not fail the whole batch
+        return FetchedPage(
+            url=result.url,
+            title=result.title,
+            text="",
+            timestamp=datetime.now(timezone.utc),
+            fetch_method="pdf",
+            error=f"pdf extraction failed: {exc}",
+        )
+
+    if len(text.split()) < _MIN_ACCEPTABLE_WORD_COUNT:
+        return FetchedPage(
+            url=result.url,
+            title=result.title,
+            text="",
+            timestamp=datetime.now(timezone.utc),
+            fetch_method="pdf",
+            error="pdf produced too little extractable text (likely scanned/image-only -- no OCR)",
+        )
+
+    return FetchedPage(
+        url=result.url,
+        title=result.title,
+        text=text,
+        timestamp=datetime.now(timezone.utc),
+        fetch_method="pdf",
     )
 
 

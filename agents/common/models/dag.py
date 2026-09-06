@@ -93,6 +93,13 @@ class RunState(BaseModel):
     overall_status: OverallStatus = "running"
     failure_count: int = 0
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+    # Set by the Synthesizer once it drafts an answer for this run (see
+    # agents/synthesizer/main.py) and persisted back via run_store.save_run
+    # so GET /runs/{run_id} can hand it back directly -- before this field
+    # existed, the ONLY place the answer appeared was the agents-synthesizer
+    # container's stdout/logs (see agents/common/notifier.py), which isn't
+    # something an API caller can poll for.
+    answer: str | None = None
 
 
 class PlanValidationError(Exception):

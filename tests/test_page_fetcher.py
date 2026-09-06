@@ -22,8 +22,10 @@ def _doc(text, title=None):
 
 
 class _FakeResponse:
-    def __init__(self, text):
+    def __init__(self, text, content_type="text/html", content=b""):
         self.text = text
+        self.content = content
+        self.headers = {"content-type": content_type}
 
     def raise_for_status(self):
         pass
@@ -202,3 +204,109 @@ def test_fetch_pages_isolates_one_bad_url_from_the_rest(monkeypatch):
     assert len(pages) == 3
     assert sum(1 for p in pages if p.error is None) == 2
     assert [p.url for p in pages if p.error is not None] == ["https://bad.test"]
+
+
+# --- PDF handling ---------------------------------------------------------
+# Neither trafilatura (HTML-only) nor Playwright (a PDF response triggers a
+# browser download event and raises) can read a PDF -- see page_fetcher.py's
+# module docstring. These cover both ways a PDF is detected: an obvious
+# ".pdf" URL, and a URL without that extension whose server reports
+# Content-Type: application/pdf (the case caught live via Tavily).
+
+
+def test_looks_like_pdf_url_detects_pdf_extension():
+    assert page_fetcher._looks_like_pdf_url("https://example.test/report.pdf")
+    assert page_fetcher._looks_like_pdf_url("https://example.test/report.PDF?x=1")
+    assert not page_fetcher._looks_like_pdf_url("https://example.test/page.html")
+
+
+def test_fetch_one_routes_pdf_url_straight_to_pdf_path_never_playwright(monkeypatch):
+    monkeypatch.setattr(page_fetcher, "_fetch_pdf", lambda result, timeout: page_fetcher.FetchedPage(
+        url=result.url, title=result.title, text="pdf content " * 10,
+        timestamp=__import__("datetime").datetime.now(__import__("datetime").timezone.utc), fetch_method="pdf",
+    ))
+    monkeypatch.setattr(page_fetcher, "_fetch_fast", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not try HTML fast path for a PDF URL")))
+    monkeypatch.setattr(page_fetcher, "_fetch_with_playwright", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not try Playwright for a PDF URL")))
+
+    page = page_fetcher._fetch_one(_result(url="https://example.test/report.pdf"), timeout_seconds=9)
+
+    assert page.fetch_method == "pdf"
+    assert page.error is None
+
+
+def test_extract_pdf_page_returns_extracted_text_on_success():
+    # A blank-page PDF extracts no real text via pypdf, so patch extract_text
+    # directly rather than relying on real PDF content generation here.
+    class _FakePage:
+        def extract_text(self):
+            return "real extracted words " * 10
+
+    class _FakeReader:
+        def __init__(self, *a, **kw):
+            self.pages = [_FakePage(), _FakePage()]
+
+    import agents.web_navigator.page_fetcher as pf_module
+    original = pf_module.PdfReader
+    pf_module.PdfReader = _FakeReader
+    try:
+        page = page_fetcher._extract_pdf_page(_result(), b"%PDF-fake-bytes")
+    finally:
+        pf_module.PdfReader = original
+
+    assert page.fetch_method == "pdf"
+    assert page.error is None
+    assert "real extracted words" in page.text
+
+
+def test_extract_pdf_page_reports_error_on_corrupt_pdf():
+    page = page_fetcher._extract_pdf_page(_result(), b"not a real pdf")
+
+    assert page.error is not None
+    assert page.text == ""
+    assert page.fetch_method == "pdf"
+
+
+def test_extract_pdf_page_reports_error_when_too_little_text_extracted():
+    """The scanned/image-only-PDF case: pypdf has no OCR, so extraction
+    "succeeds" with empty/near-empty text. Must be reported as a failure,
+    not silently returned as a near-empty success."""
+    import agents.web_navigator.page_fetcher as pf_module
+
+    class _FakePage:
+        def extract_text(self):
+            return "scan"
+
+    class _FakeReader:
+        def __init__(self, *a, **kw):
+            self.pages = [_FakePage()]
+
+    original = pf_module.PdfReader
+    pf_module.PdfReader = _FakeReader
+    try:
+        page = page_fetcher._extract_pdf_page(_result(), b"%PDF-fake-bytes")
+    finally:
+        pf_module.PdfReader = original
+
+    assert page.error is not None
+    assert "scanned" in page.error or "little" in page.error
+
+
+def test_fetch_fast_routes_to_pdf_extraction_when_content_type_says_pdf(monkeypatch):
+    """The URL doesn't end in .pdf, but the server says it's one -- must not
+    be handed to trafilatura, and must not fall through to Playwright."""
+    monkeypatch.setattr(
+        httpx, "get",
+        lambda *a, **kw: _FakeResponse("ignored", content_type="application/pdf; charset=binary", content=b"%PDF-fake"),
+    )
+    monkeypatch.setattr(
+        page_fetcher, "_extract_pdf_page",
+        lambda result, pdf_bytes: page_fetcher.FetchedPage(
+            url=result.url, title=result.title, text="pdf text " * 10,
+            timestamp=__import__("datetime").datetime.now(__import__("datetime").timezone.utc), fetch_method="pdf",
+        ),
+    )
+
+    page = page_fetcher._fetch_fast(_result(url="https://example.test/download?id=42"), timeout_seconds=9)
+
+    assert page is not None
+    assert page.fetch_method == "pdf"

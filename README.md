@@ -164,7 +164,22 @@ reasoned about:
   package-registry allowlist, so Tavily itself and the full
   `docker compose up` orchestration have never been exercised end-to-end
   by this assistant — only by you, on your machine. Everything above is
-  the maximum verification achievable without that.
+  the maximum verification achievable without that. (Update: it has since
+  been run end-to-end for real, against live Tavily results and real
+  sites — see below.)
+- **Confirmed against a real `docker compose up` run**, three more real
+  gaps surfaced and were closed: Langfuse traces were showing `0.00s` /
+  `0 tokens` / `$0.00` on every call because the tracer never passed a
+  model, token usage, or real timestamps to `trace.generation()` — fixed
+  by threading `response.usage` back through `lyzr_wrapper.py`'s
+  `LLMResult`. The drafted answer had no way to be fetched back over the
+  API — it only ever reached `agents-synthesizer`'s stdout — fixed by
+  persisting it onto `RunState.answer`, returned by `GET /runs/{run_id}`.
+  And a Tavily result pointing at a PDF failed both fetch paths silently
+  (trafilatura can't parse binary content; Playwright's `page.goto()`
+  raises on the resulting download event) — fixed with a dedicated
+  `pypdf`-based extraction path, tried whenever a URL looks like a PDF or
+  the server's `Content-Type` says so.
 
 ## What's dormant (kept, not deleted, not live)
 
@@ -242,10 +257,16 @@ Then:
 - `curl -s http://localhost:8000/ready | python3 -m json.tool` — per-dependency
   readiness (Qdrant reachable, which API keys are actually configured).
 - `curl -s http://localhost:8000/runs/<run_id> | python3 -m json.tool` — live
-  DAG run state (same content as `data/runs/<run_id>.json`).
+  DAG run state (same content as `data/runs/<run_id>.json`); once the
+  Synthesizer finishes, the response's `"answer"` field IS the drafted,
+  cited answer — this is the one place to fetch it back over the API.
 - `http://localhost:6333/dashboard` — Qdrant collection `web_pages`.
-- `http://localhost:3000` — Langfuse trace UI.
-- stdout of `agents-synthesizer` — the drafted, cited answer.
+- `http://localhost:3000` — Langfuse trace UI (call-level latency/tokens/cost
+  for the drafting LLM call only — not where the answer itself is meant to
+  be read).
+- stdout of `agents-synthesizer` — the same drafted, cited answer, printed
+  as it's produced (useful for following along live; `/runs/<run_id>` is
+  the way to fetch it back afterward, e.g. from another process).
 
 ## Testing
 
@@ -254,12 +275,14 @@ uv sync
 uv run pytest -q
 ```
 
-132 tests, fully offline (no Docker, no network, no API keys) — the DAG
+140 tests, fully offline (no Docker, no network, no API keys) — the DAG
 executor (including genuine multi-threaded concurrency, not simulated),
 chunking, the search/fetch/embed/retrieve pipeline (mocked at the I/O
-boundary), retention/pruning, readiness checks, and the indexed watcher
-are all exercised. The dormant pipelines' tests still run too (nothing
-about them broke).
+boundary), PDF extraction and its content-type/URL-extension detection,
+retention/pruning, readiness checks, the indexed watcher, and the
+Synthesizer persisting its drafted answer back onto the run are all
+exercised. The dormant pipelines' tests still run too (nothing about them
+broke).
 
 Plus 5 opt-in tests against a **real** local HTTP server and a **real**
 headless Chromium — no mocking of httpx, trafilatura, or Playwright:
