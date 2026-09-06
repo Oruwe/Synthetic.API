@@ -101,11 +101,20 @@ def test_finding_flag_on_title_redacts_only_title():
     result = drafter._finding_to_prompt_dict(record)
 
     assert "REDACTED" in result["title"]
-    # summary wasn't flagged -- must survive. key_facts is conservatively
-    # dropped on ANY hit in this finding (see the function's own comment),
-    # so that part is unaffected by which specific field triggered it.
+    # Neither summary nor key_facts was itself flagged -- both must
+    # survive untouched, unaffected by the unrelated title flag.
     assert result["summary"] == "A summary"
+    assert result["key_facts"] == ["fact one", "fact two"]
+
+
+def test_finding_flag_on_key_facts_drops_only_key_facts():
+    record = _finding_record(flags=["ignore_instructions:key_facts"])
+
+    result = drafter._finding_to_prompt_dict(record)
+
     assert result["key_facts"] == []
+    assert result["title"] == "A Title"  # untouched, not flagged
+    assert result["summary"] == "A summary"  # untouched, not flagged
 
 
 def test_finding_flag_on_summary_redacts_only_summary():

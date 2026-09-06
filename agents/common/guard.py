@@ -31,10 +31,10 @@ class GuardHit(BaseModel):
 # is more defensible than an opaque model, and these are fast/dependency-free.
 PATTERNS: list[tuple[str, re.Pattern]] = [
     ("ignore_instructions", re.compile(r"ignore\s+(all\s+|any\s+)?(previous|prior|above)\s+instructions", re.I)),
-    ("disregard_prompt", re.compile(r"disregard\s+(the\s+)?(system|previous)\s+(prompt|instructions)", re.I)),
+    ("disregard_prompt", re.compile(r"disregard\s+(all\s+|any\s+)?(the\s+)?(system|previous)\s+(prompt|instructions)", re.I)),
     ("role_marker", re.compile(r"(^|\n)\s*(system|assistant|user)\s*:", re.I)),
     ("chat_control_token", re.compile(r"(<\|im_start\|>|<\|im_end\|>|\[INST\]|\[/INST\])", re.I)),
-    ("persona_override", re.compile(r"\byou are now\b|\back as\b", re.I)),
+    ("persona_override", re.compile(r"\byou are now\b|\bact as\b", re.I)),
     ("prompt_leak_probe", re.compile(r"(reveal|print|show)\s+(your|the)\s+(system prompt|instructions)", re.I)),
 ]
 

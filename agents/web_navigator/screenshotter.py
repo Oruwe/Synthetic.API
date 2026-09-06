@@ -9,20 +9,17 @@ fail the whole batch (same lesson as extractor.py's per-row isolation --
 applied here to per-URL capture instead of per-row parsing).
 """
 
-import os
 from datetime import datetime, timezone
 from pathlib import Path
-
-from playwright.sync_api import sync_playwright
 
 from agents.common.config import settings
 from agents.common.logging import get_logger
 from agents.common.models.research import ScreenshotCapture, SearchResult
+from agents.common.playwright_utils import PAGE_DEFAULT_TIMEOUT_MS, launched_browser
 
 logger = get_logger(component="screenshotter")
 
-_CHROMIUM_EXECUTABLE_OVERRIDE = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE")
-_PAGE_DEFAULT_TIMEOUT_MS = 15_000
+_PAGE_DEFAULT_TIMEOUT_MS = PAGE_DEFAULT_TIMEOUT_MS
 
 
 def capture_screenshots(results: list[SearchResult], run_id: str) -> list[ScreenshotCapture]:
@@ -30,18 +27,9 @@ def capture_screenshots(results: list[SearchResult], run_id: str) -> list[Screen
     out_dir.mkdir(parents=True, exist_ok=True)
 
     captures: list[ScreenshotCapture] = []
-    with sync_playwright() as p:
-        # `timeout=` bounds the browser LAUNCH itself, not covered by
-        # page.set_default_timeout() (page-level operations only).
-        launch_kwargs = {"headless": True, "timeout": _PAGE_DEFAULT_TIMEOUT_MS}
-        if _CHROMIUM_EXECUTABLE_OVERRIDE:
-            launch_kwargs["executable_path"] = _CHROMIUM_EXECUTABLE_OVERRIDE
-        browser = p.chromium.launch(**launch_kwargs)
-        try:
-            for i, result in enumerate(results):
-                captures.append(_capture_one(browser, result, out_dir, i))
-        finally:
-            browser.close()
+    with launched_browser(_PAGE_DEFAULT_TIMEOUT_MS) as browser:
+        for i, result in enumerate(results):
+            captures.append(_capture_one(browser, result, out_dir, i))
 
     ok = sum(1 for c in captures if c.error is None)
     logger.info("screenshots_captured", requested=len(results), succeeded=ok, failed=len(captures) - ok)

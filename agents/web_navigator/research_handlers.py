@@ -19,6 +19,12 @@ logger = get_logger(component="research_handlers")
 # (unlike the mock portal, it's not content we control), so anything it
 # writes into a screenshot that the VLM then transcribes is treated as
 # untrusted, exactly like a scraped DOM field.
+#
+# key_facts is scanned per-item (it's a list, not a scalar string) below --
+# it's VLM-transcribed free text from the same untrusted page and was
+# previously left out here entirely, which meant an injection payload that
+# only showed up in a "key fact" (title/summary staying clean) went
+# unflagged and reached drafter.py's prompt unredacted.
 _SCANNED_FIELDS = ("title", "summary")
 
 
@@ -54,6 +60,16 @@ def handle_analyze_screenshots(node: DAGNode, ctx: RunContext) -> str:
         )
         for field_name in _SCANNED_FIELDS:
             for hit in scan_for_injection(getattr(finding, field_name), field_name):
+                finding.flags.append(f"{hit.pattern_name}:{hit.field_name}")
+                logger.warning(
+                    "guard_hit",
+                    url=finding.url,
+                    pattern_name=hit.pattern_name,
+                    field_name=hit.field_name,
+                    matched_text=hit.matched_text,
+                )
+        for key_fact in finding.key_facts:
+            for hit in scan_for_injection(key_fact, "key_facts"):
                 finding.flags.append(f"{hit.pattern_name}:{hit.field_name}")
                 logger.warning(
                     "guard_hit",

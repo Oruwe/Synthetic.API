@@ -8,20 +8,17 @@ content is ever handed to an LLM here, that only happens per-screenshot in
 the vision-analysis step, and only as an image, never as scraped page text.
 """
 
-import os
 from urllib.parse import parse_qs, quote, unquote, urlparse
-
-from playwright.sync_api import sync_playwright
 
 from agents.common.config import settings
 from agents.common.logging import get_logger
 from agents.common.models.research import SearchResult
+from agents.common.playwright_utils import PAGE_DEFAULT_TIMEOUT_MS, launched_browser
 
 logger = get_logger(component="searcher")
 
 _RESULT_LINK_SELECTOR = "a.result__a"
-_CHROMIUM_EXECUTABLE_OVERRIDE = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE")
-_PAGE_DEFAULT_TIMEOUT_MS = 15_000
+_PAGE_DEFAULT_TIMEOUT_MS = PAGE_DEFAULT_TIMEOUT_MS
 
 
 def _unwrap_ddg_redirect(href: str) -> str:
@@ -38,38 +35,29 @@ def _unwrap_ddg_redirect(href: str) -> str:
 def search_web(query: str, max_results: int | None = None) -> list[SearchResult]:
     max_results = max_results or settings.research_max_results
 
-    with sync_playwright() as p:
-        # `timeout=` bounds the browser LAUNCH itself, not covered by
-        # page.set_default_timeout() below (page-level operations only).
-        launch_kwargs = {"headless": True, "timeout": _PAGE_DEFAULT_TIMEOUT_MS}
-        if _CHROMIUM_EXECUTABLE_OVERRIDE:
-            launch_kwargs["executable_path"] = _CHROMIUM_EXECUTABLE_OVERRIDE
-        browser = p.chromium.launch(**launch_kwargs)
-        try:
-            page = browser.new_page()
-            page.set_default_timeout(_PAGE_DEFAULT_TIMEOUT_MS)
-            # DDG's HTML endpoint accepts the query as a GET param; a built
-            # URL avoids a form-fill round trip.
-            response = page.goto(f"{settings.search_engine_url}?q={quote(query)}")
-            # page.goto() does NOT raise on an HTTP error status -- without
-            # this, a rate-limited/blocked search (a common DDG response
-            # under automated load) would silently look identical to "zero
-            # results found" instead of the distinguishable failure it is.
-            if response is not None and response.status >= 400:
-                raise RuntimeError(f"search engine returned HTTP {response.status}")
+    with launched_browser(_PAGE_DEFAULT_TIMEOUT_MS) as browser:
+        page = browser.new_page()
+        page.set_default_timeout(_PAGE_DEFAULT_TIMEOUT_MS)
+        # DDG's HTML endpoint accepts the query as a GET param; a built
+        # URL avoids a form-fill round trip.
+        response = page.goto(f"{settings.search_engine_url}?q={quote(query)}")
+        # page.goto() does NOT raise on an HTTP error status -- without
+        # this, a rate-limited/blocked search (a common DDG response
+        # under automated load) would silently look identical to "zero
+        # results found" instead of the distinguishable failure it is.
+        if response is not None and response.status >= 400:
+            raise RuntimeError(f"search engine returned HTTP {response.status}")
 
-            results: list[SearchResult] = []
-            for link in page.query_selector_all(_RESULT_LINK_SELECTOR):
-                title = (link.inner_text() or "").strip()
-                href = link.get_attribute("href") or ""
-                url = _unwrap_ddg_redirect(href)
-                if not title or not url.startswith("http"):
-                    continue
-                results.append(SearchResult(title=title[:300], url=url))
-                if len(results) >= max_results:
-                    break
+        results: list[SearchResult] = []
+        for link in page.query_selector_all(_RESULT_LINK_SELECTOR):
+            title = (link.inner_text() or "").strip()
+            href = link.get_attribute("href") or ""
+            url = _unwrap_ddg_redirect(href)
+            if not title or not url.startswith("http"):
+                continue
+            results.append(SearchResult(title=title[:300], url=url))
+            if len(results) >= max_results:
+                break
 
-            logger.info("web_search_completed", query=query, result_count=len(results))
-            return results
-        finally:
-            browser.close()
+        logger.info("web_search_completed", query=query, result_count=len(results))
+        return results

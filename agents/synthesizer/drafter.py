@@ -112,11 +112,13 @@ def _finding_to_prompt_dict(record: qm.Record) -> dict:
         "url": payload.get("url"),
         "title": _value("title"),
         "summary": _value("summary"),
-        # key_facts isn't itself guard-scanned (see research_handlers.py's
-        # _SCANNED_FIELDS -- only title/summary are) -- dropped entirely on
-        # any hit in this finding as a conservative belt-and-suspenders
-        # measure, same as before, not because it's independently flagged.
-        "key_facts": [] if flagged_fields else (payload.get("key_facts") or []),
+        # key_facts IS guard-scanned per-item (see research_handlers.py's
+        # handle_analyze_screenshots -- a hit anywhere in the list tags
+        # the whole field as "key_facts"), so dropping it here precisely
+        # when that field itself was flagged, rather than whenever ANY
+        # field on the finding was, no longer discards a clean key_facts
+        # list just because an unrelated field (title/summary) was hit.
+        "key_facts": [] if "key_facts" in flagged_fields else (payload.get("key_facts") or []),
     }
 
 
