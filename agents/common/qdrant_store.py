@@ -31,6 +31,7 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 from agents.common.chunking import chunk_text
 from agents.common.config import settings
 from agents.common.logging import get_logger
+from agents.common.models.action import ActionWorkflow
 from agents.common.models.orders import DelayedOrder
 from agents.common.models.page import FetchedPage
 from agents.common.models.research import VisionFinding
@@ -425,3 +426,84 @@ def _scroll_all_matching(
             break
         offset = next_offset
     return matched
+
+
+# --- Ambient RPA action path (action_workflows collection) -----------------
+
+
+def upsert_action_workflow(workflow: ActionWorkflow, client: QdrantClient | None = None) -> str:
+    """Stores one attempted ActionWorkflow -- successful or not -- embedded
+    by its intent text. Persisted regardless of outcome: a failed/refused
+    attempt is still useful signal (find_similar_workflow below only
+    replays successful ones), and every attempt should be auditable.
+    Never raises: a Qdrant outage here must not lose the fact that a real
+    browser action was already taken in the physical world, so the caller
+    (action_executor.py) logs the workflow either way and this failing is
+    a secondary, best-effort concern -- same fail-open discipline as
+    every other Qdrant write in this module.
+    """
+    client = client or get_client()
+    point_id = f"{workflow.run_id}:{workflow.intent}"
+    try:
+        ensure_collection(settings.qdrant_action_workflows_collection, client)
+        vector = embed_text(workflow.intent)
+        client.upsert(
+            collection_name=settings.qdrant_action_workflows_collection,
+            points=[
+                qm.PointStruct(
+                    id=_stable_uuid(point_id),
+                    vector=vector,
+                    payload={
+                        "run_id": workflow.run_id,
+                        "intent": workflow.intent,
+                        "start_url": workflow.start_url,
+                        "steps": [s.model_dump(mode="json") for s in workflow.steps],
+                        "success": workflow.success,
+                        "refused_reason": workflow.refused_reason,
+                        "created_at": workflow.created_at.isoformat(),
+                        "point_key": point_id,
+                    },
+                )
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001 - the real-world action already happened; storage is secondary
+        logger.warning("action_workflow_upsert_failed", run_id=workflow.run_id, error=str(exc))
+    return point_id
+
+
+def find_similar_workflow(intent: str, min_score: float | None = None) -> ActionWorkflow | None:
+    """Semantic search for a past SUCCESSFUL workflow whose intent is close
+    enough to `intent` to trust replaying it outright. Deliberately more
+    conservative than semantic_search_pages' read-only top-k retrieval: a
+    wrong match here means executing real clicks/keystrokes on a real page
+    on the strength of a bad vector match, not just citing a slightly-off
+    source. Returns None (never raises) on any failure, an empty result,
+    or a best match below `min_score` -- all three mean "explore fresh,"
+    handled identically by the caller.
+    """
+    min_score = min_score if min_score is not None else settings.action_workflow_replay_min_score
+    try:
+        client = get_client()
+        ensure_collection(settings.qdrant_action_workflows_collection, client)
+        query_vector = embed_text(intent)
+        response = client.query_points(
+            collection_name=settings.qdrant_action_workflows_collection,
+            query=query_vector,
+            query_filter=qm.Filter(must=[qm.FieldCondition(key="success", match=qm.MatchValue(value=True))]),
+            limit=1,
+            with_payload=True,
+        )
+        if not response.points or response.points[0].score < min_score:
+            return None
+        payload = dict(response.points[0].payload or {})
+        # "point_key" is a dedup/lookup field we stow on every payload in
+        # this module (see upsert_action_workflow above) -- it isn't part
+        # of the ActionWorkflow schema, and the model is extra="forbid", so
+        # it must be dropped before validating back into the model or this
+        # would raise on every real point and silently look identical to
+        # "no similar workflow found."
+        payload.pop("point_key", None)
+        return ActionWorkflow.model_validate(payload)
+    except Exception as exc:  # noqa: BLE001 - a lookup failure must fall through to fresh exploration, not crash
+        logger.warning("find_similar_workflow_failed", intent=intent, error=str(exc))
+        return None

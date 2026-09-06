@@ -21,6 +21,27 @@ class Settings(BaseSettings):
     # order records or vision-model findings). Separate name per the pivot
     # spec, rather than mixing schemas into an existing collection.
     qdrant_pages_collection: str = "web_pages"
+    # The ambient-RPA action path's collection: one point per attempted
+    # ActionWorkflow (successful or not), embedded by intent text, so a
+    # semantically-similar future intent can find and replay a prior
+    # successful workflow instead of re-exploring from scratch.
+    qdrant_action_workflows_collection: str = "action_workflows"
+
+    # --- Ambient RPA action path (screenshot -> vision decides -> Playwright
+    # acts, looped) ---
+    # A hard ceiling, not a target: most simple tasks should finish well
+    # under this. Exists so a confused model (or a page that never reaches
+    # a recognizable "done" state) can't loop forever -- bounded the same
+    # way every other external call in this codebase is (see
+    # page_fetch_timeout_seconds, DAG_CIRCUIT_BREAKER_THRESHOLD, etc.).
+    action_max_steps: int = 8
+    # A prior workflow must score at least this well (cosine similarity)
+    # against the new intent before it's trusted enough to replay blindly
+    # rather than treated as just a hint. Conservative on purpose: a wrong
+    # replay executes real actions on a real page, unlike a wrong semantic
+    # search result in the read-only research path, which just costs one
+    # bad citation.
+    action_workflow_replay_min_score: float = 0.85
 
     # --- Run state ---
     run_store_dir: str = "/data/runs"
