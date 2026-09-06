@@ -19,12 +19,14 @@ and doesn't burn a limited hackathon LLM credit budget on every row/page/chunk.
 """
 
 import math
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastembed import TextEmbedding
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 from agents.common.chunking import chunk_text
 from agents.common.config import settings
@@ -40,19 +42,29 @@ _VECTOR_SIZE = 384  # bge-small-en-v1.5 output dimension
 
 _client: QdrantClient | None = None
 _embedder: TextEmbedding | None = None
+_client_lock = threading.Lock()
+_embedder_lock = threading.Lock()
 
 
 def get_client() -> QdrantClient:
     global _client
     if _client is None:
-        _client = QdrantClient(url=settings.qdrant_url)
+        # Double-checked locking: multiple node handlers can call this
+        # concurrently (the DAG executor's ThreadPoolExecutor, or several
+        # FastAPI requests at once) -- without the lock, two threads racing
+        # the first call each build and discard a QdrantClient/connection.
+        with _client_lock:
+            if _client is None:
+                _client = QdrantClient(url=settings.qdrant_url)
     return _client
 
 
 def get_embedder() -> TextEmbedding:
     global _embedder
     if _embedder is None:
-        _embedder = TextEmbedding(model_name=_EMBEDDING_MODEL_NAME)
+        with _embedder_lock:
+            if _embedder is None:
+                _embedder = TextEmbedding(model_name=_EMBEDDING_MODEL_NAME)
     return _embedder
 
 
@@ -64,10 +76,20 @@ def ensure_collection(collection_name: str, client: QdrantClient | None = None) 
     client = client or get_client()
     existing = {c.name for c in client.get_collections().collections}
     if collection_name not in existing:
-        client.create_collection(
-            collection_name=collection_name,
-            vectors_config=qm.VectorParams(size=_VECTOR_SIZE, distance=qm.Distance.COSINE),
-        )
+        try:
+            client.create_collection(
+                collection_name=collection_name,
+                vectors_config=qm.VectorParams(size=_VECTOR_SIZE, distance=qm.Distance.COSINE),
+            )
+        except UnexpectedResponse as exc:
+            # TOCTOU: two callers can both see the collection missing (e.g.
+            # two concurrent first requests right after a fresh `docker
+            # compose up`, since FastAPI runs these sync handlers in a
+            # thread pool) and both race to create it -- Qdrant 409s the
+            # loser. That's fine, the collection exists either way; only
+            # re-raise if creation failed for some other reason.
+            if exc.status_code != 409:
+                raise
 
 
 def _stable_uuid(key: str) -> str:

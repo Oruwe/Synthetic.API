@@ -21,8 +21,17 @@ def chunk_text(text: str, chunk_size: int = 800, overlap: int = 100) -> list[str
     start = 0
     step = chunk_size - overlap
     while start < len(text):
-        chunk = text[start : start + chunk_size].strip()
+        end = start + chunk_size
+        chunk = text[start:end].strip()
         if chunk:
             chunks.append(chunk)
+        if end >= len(text):
+            # Reached the end of the text with this window -- stop here.
+            # Stepping again would only ever re-slice a tail that's already
+            # wholly contained in the chunk just appended (e.g. a 1450-char
+            # text with the defaults produced a 3rd "chunk" that was a pure
+            # substring of the 2nd), wasting an embed call/Qdrant point on a
+            # duplicate with no new content and diluting semantic search.
+            break
         start += step
     return chunks

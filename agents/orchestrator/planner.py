@@ -75,7 +75,12 @@ def build_plan(transcript: str, run_id: str | None = None) -> DAGPlan:
             timeout_seconds=180,
         ),
     ]
-    edges = [DAGEdge(from_node="fetch", to_node="embed")]
+    # Derived from each node's depends_on rather than hand-listed a second
+    # time -- the executor's own graph building (_build_graph) only reads
+    # depends_on, so a hand-maintained `edges` list here was a second,
+    # disconnected source of truth that could silently drift out of sync
+    # with the actual dependency a future edit adds to a node.
+    edges = [DAGEdge(from_node=dep, to_node=node.id) for node in nodes for dep in node.depends_on]
 
     return DAGPlan(
         run_id=run_id,

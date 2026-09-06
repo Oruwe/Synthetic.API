@@ -31,8 +31,16 @@ def verify_webhook_secret(provided_secret: str | None) -> None:
 
 
 def parse_omi_payload(payload: dict) -> str:
-    if "transcript" in payload and isinstance(payload["transcript"], str):
-        return payload["transcript"].strip()
+    transcript = payload.get("transcript")
+    # Require non-empty content, not just presence of the key -- a payload
+    # can plausibly carry an empty/placeholder `transcript` string alongside
+    # the real utterance in `segments` (e.g. a field populated by a later
+    # processing step than the one that fired this webhook). Returning ""
+    # here unconditionally would discard that real content and surface as
+    # "transcript is empty" from planner.build_plan() instead of falling
+    # through to the checks below.
+    if isinstance(transcript, str) and transcript.strip():
+        return transcript.strip()
 
     segments = payload.get("segments") or payload.get("transcript_segments")
     if isinstance(segments, list) and segments:

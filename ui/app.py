@@ -44,11 +44,17 @@ def _format_sources_markdown(sources: list[dict], sources_attempted, sources_suc
     if sources:
         lines.append("**Sources:**")
         for s in sources:
-            title = s.get("title") or s.get("url")
-            url = s.get("url")
+            title = s.get("title") or s.get("url") or ""
+            url = s.get("url") or ""
             score = s.get("score")
             score_str = f" _(relevance {score:.2f})_" if isinstance(score, (int, float)) else ""
-            lines.append(f"- [{title}]({url}){score_str}")
+            # Escape `[`/`]` in the title and wrap the URL in `<...>` (a
+            # CommonMark "explicit" link destination): titles or URLs with
+            # literal parens/brackets are common in the wild (e.g. Wikipedia
+            # disambiguation pages like ".../Gaganyaan_(spacecraft)") and
+            # would otherwise close the markdown link early, truncating it.
+            safe_title = title.replace("[", "\\[").replace("]", "\\]")
+            lines.append(f"- [{safe_title}](<{url}>){score_str}")
     if sources_attempted and sources_succeeded is not None and sources_succeeded < sources_attempted:
         lines.append(f"\n_Partial results: {sources_succeeded}/{sources_attempted} candidate sources were retrievable._")
     return "\n".join(lines)
@@ -168,4 +174,9 @@ with gr.Blocks(title="Synthetic.API") as demo:
     read_aloud_button.click(None, inputs=answer_box, outputs=None, js=_READ_ALOUD_JS)
 
 if __name__ == "__main__":
-    demo.queue().launch(server_name="0.0.0.0", server_port=7860)
+    # ask() blocks its own request for up to _MAX_WAIT_SECONDS while polling.
+    # Gradio's queue defaults to a concurrency limit of 1, which would
+    # serialize every question behind that wait -- a second person's click
+    # would just sit frozen for up to 5 minutes during a live demo. Raise it
+    # so a handful of people can ask questions at the same time.
+    demo.queue(default_concurrency_limit=10).launch(server_name="0.0.0.0", server_port=7860)

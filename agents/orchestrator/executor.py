@@ -6,6 +6,7 @@ in-memory graph is enough for a handful of nodes per run, and networkx is
 used only for topological ordering + cycle detection, not as a runtime.
 """
 
+import contextvars
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
@@ -79,15 +80,25 @@ def execute_plan(plan: DAGPlan) -> RunState:
             # of an answer when they ask for something unsupported.
             run = run_store.create_run(plan)
             ctx = RunContext(run_id=plan.run_id)
-            _run_node_with_retry(run, plan.nodes[0], ctx)
+            if plan.nodes:
+                _run_node_with_retry(run, plan.nodes[0], ctx)
             run.overall_status = "no_capability"
-            run_store.save_run(run)
-            notifier.notify(
+            # Persist the answer onto the run itself, not just notifier.notify()'s
+            # logs/webhook -- a no_capability run is never picked up by the
+            # Synthesizer (it never writes a Qdrant point, and watcher.py's
+            # _TERMINAL_STATUSES doesn't include "no_capability"), so without
+            # this, GET /runs/{run_id} would return answer=None forever and a
+            # polling client (e.g. ui/app.py) would wait the full timeout for
+            # an answer that was actually ready immediately.
+            message = (
                 f'I couldn\'t find a supported action for: "{plan.transcript}". '
                 "Supported right now: checking the shipping portal for delayed orders, "
-                "and web research queries.",
-                plan.run_id,
+                "and web research queries."
             )
+            run.answer = message
+            run.answer_text = message
+            run_store.save_run(run)
+            notifier.notify(message, plan.run_id)
             logger.info("plan_no_capability_notified", transcript=plan.transcript)
             return run
 
@@ -151,7 +162,17 @@ def _run_node_with_retry(run: RunState, node: DAGNode, ctx: RunContext) -> None:
         run_store.update_node_state(run, node.id, state)
         logger.info("node_attempt_started", attempt=attempt, max_retries=node.max_retries)
 
-        future = _thread_pool.submit(handler, node, ctx)
+        # contextvars (which structlog's bind_run_context/bind_contextvars
+        # use, see logging.py) do NOT cross a ThreadPoolExecutor thread
+        # boundary on their own -- submitting `handler` directly meant
+        # every log line a handler emitted (page_fetcher.py, qdrant_store.py,
+        # etc., all called from inside handlers) silently lost its
+        # run_id/node_id, defeating the whole point of correlated JSON
+        # logs independent of Langfuse. copy_context().run(...) explicitly
+        # carries the calling thread's bound context (already set via
+        # bind_run_context two lines above) into the worker thread.
+        ctx_snapshot = contextvars.copy_context()
+        future = _thread_pool.submit(ctx_snapshot.run, handler, node, ctx)
         try:
             result = future.result(timeout=node.timeout_seconds)
         except FutureTimeoutError:

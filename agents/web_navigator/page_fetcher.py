@@ -34,6 +34,7 @@ one.
 
 import io
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -59,11 +60,31 @@ _CHROMIUM_EXECUTABLE_OVERRIDE = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE")
 # threshold while being useless content -- word count is a slightly better
 # proxy, though still a proxy, not a true quality judgment.
 _MIN_ACCEPTABLE_WORD_COUNT = 40
+# Bounds how many URLs are fetched at once. Each URL is fully isolated (see
+# module docstring) so there's no correctness reason to serialize them --
+# doing so was a real bug: fetching results one at a time meant N URLs each
+# up to `timeout_seconds` (worse with a Playwright fallback per URL) could
+# add up to well past the DAG "fetch" node's own outer timeout (100s, with
+# only 1 retry -- see planner.py), timing out the whole node and discarding
+# every page already fetched even though most individual fetches succeeded.
+# Kept modest rather than "one worker per URL" so this respects the same
+# per-domain rate limit/robots-fetch machinery without hammering a site
+# that happens to dominate a result set.
+_FETCH_CONCURRENCY = 4
 
 
 def fetch_pages(results: list[SearchResult], timeout_seconds: float | None = None) -> list[FetchedPage]:
     timeout_seconds = timeout_seconds or settings.page_fetch_timeout_seconds
-    pages = [_fetch_one(result, timeout_seconds) for result in results]
+    if not results:
+        return []
+
+    with ThreadPoolExecutor(
+        max_workers=min(_FETCH_CONCURRENCY, len(results)), thread_name_prefix="page-fetch"
+    ) as pool:
+        # pool.map preserves input order in its output, so callers can still
+        # zip `results` against the returned pages positionally.
+        pages = list(pool.map(lambda result: _fetch_one(result, timeout_seconds), results))
+
     ok = sum(1 for p in pages if p.error is None)
     logger.info("pages_fetched", requested=len(results), succeeded=ok, failed=len(pages) - ok)
     return pages

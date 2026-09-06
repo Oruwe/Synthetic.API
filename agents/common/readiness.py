@@ -44,8 +44,15 @@ def check_tavily_key_configured() -> CheckResult:
 
 
 def check_llm_key_configured() -> CheckResult:
-    ok = bool(settings.lyzr_api_key or settings.openrouter_api_key)
-    detail = "" if ok else "neither LYZR_API_KEY nor OPENROUTER_API_KEY set -- answers will fall back to a template"
+    # A configured LYZR_API_KEY only matters if Lyzr is actually enabled
+    # (lyzr_wrapper.py only builds a LyzrBackend when lyzr_enabled is set --
+    # otherwise it falls straight through to the OpenRouter fallback). Without
+    # this check, an operator who sets LYZR_API_KEY but leaves the (default
+    # False) LYZR_ENABLED flag off, and never sets OPENROUTER_API_KEY, would
+    # see this check report "ok" while every real answer silently falls back
+    # to the template.
+    ok = bool((settings.lyzr_enabled and settings.lyzr_api_key) or settings.openrouter_api_key)
+    detail = "" if ok else "neither LYZR_API_KEY (with LYZR_ENABLED) nor OPENROUTER_API_KEY set -- answers will fall back to a template"
     return CheckResult(name="llm_key", ok=ok, detail=detail)
 
 

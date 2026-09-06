@@ -188,3 +188,37 @@ def test_no_capability_plan_runs_its_node_and_notifies(monkeypatch):
     assert run.node_states["clarify"].status == NodeStatus.SUCCEEDED
     assert notified.get("run_id") == plan.run_id
     assert "test transcript" in notified.get("summary", "")
+
+
+def test_handler_runs_with_the_calling_thread_s_bound_log_context():
+    """contextvars (which bind_run_context/structlog's bind_contextvars use,
+    see logging.py) do NOT cross a ThreadPoolExecutor thread boundary on
+    their own -- a handler submitted without copy_context() silently loses
+    run_id/node_id on every log line it emits, defeating the point of
+    correlated JSON logs that work independent of Langfuse. Verifies the
+    executor actually propagates the bound context into the worker thread
+    (see the contextvars.copy_context().run(...) call in _run_node_with_retry)
+    by reading contextvars.copy_context() directly from inside a handler."""
+    import contextvars
+
+    key = f"ctx_check_{uuid.uuid4().hex}"
+    seen_context_vars: dict = {}
+
+    def handler(node, ctx):
+        # structlog's bind_contextvars stores each bound key under its own
+        # ContextVar named "structlog_<key>"; reading these back from
+        # inside the handler is exactly what proves (or disproves) that
+        # context crossed threads.
+        for var in contextvars.copy_context():
+            if var.name.startswith("structlog_"):
+                seen_context_vars[var.name.removeprefix("structlog_")] = var.get()
+        return "done"
+
+    executor.register_handler(key)(handler)
+    plan = _plan([_node("a", key)])
+
+    run = executor.execute_plan(plan)
+
+    assert run.overall_status == "completed"
+    assert seen_context_vars.get("run_id") == plan.run_id
+    assert seen_context_vars.get("node_id") == "a"
