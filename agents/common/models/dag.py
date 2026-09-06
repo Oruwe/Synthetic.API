@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from agents.common.models.action import ActionWorkflow
 from agents.common.models.page import Source
 
 
@@ -30,6 +31,13 @@ class NodeType(str, Enum):
     # DAG is built) -> fetch (HTTP+trafilatura, Playwright fallback) -> chunk+embed
     FETCH_PAGES = "fetch_pages"
     EMBED_PAGES = "embed_pages"
+    # Ambient RPA action path: a single node covering the whole
+    # replay-or-explore decision + execution (see
+    # agents/web_navigator/action_handlers.py). One node, not a chain like
+    # fetch/embed above, because the replay-vs-explore choice and the
+    # step loop it drives are one atomic real-world action sequence, not
+    # separable stages another node could usefully retry independently.
+    EXECUTE_ACTION = "execute_action"
 
 
 class DAGNode(BaseModel):
@@ -123,6 +131,13 @@ class RunState(BaseModel):
     sources: list[Source] = Field(default_factory=list)
     sources_attempted: int | None = None
     sources_succeeded: int | None = None
+    # Ambient RPA action path only: the executed (or replayed) workflow,
+    # set directly by executor.execute_plan once the execute_action node
+    # finishes -- unlike the research path's answer/sources above, this
+    # never goes through the async Synthesizer, since there's no LLM
+    # drafting step for a deterministic step-by-step outcome. None for
+    # every non-action run.
+    action_workflow: ActionWorkflow | None = None
 
 
 class PlanValidationError(Exception):

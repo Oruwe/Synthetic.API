@@ -17,11 +17,13 @@ import networkx as nx
 
 from agents.common import notifier, run_store
 from agents.common.logging import bind_run_context, clear_run_context, get_logger
+from agents.common.models.action import ActionWorkflow
 from agents.common.models.dag import (
     DAGNode,
     DAGPlan,
     NodeExecutionState,
     NodeStatus,
+    NodeType,
     PlanValidationError,
     RunState,
 )
@@ -138,11 +140,45 @@ def execute_plan(plan: DAGPlan) -> RunState:
         run.overall_status = "failed" if any(
             s.status == NodeStatus.FAILED for s in run.node_states.values()
         ) else "completed"
+
+        # Ambient RPA action path reports synchronously here, unlike the
+        # live research path (fetch_pages/embed_pages), which only writes
+        # Qdrant chunks and leaves drafting the final answer to the
+        # Synthesizer's separate async poll loop. An action run has no LLM
+        # drafting step -- the outcome is a deterministic step sequence,
+        # not text to summarize -- so there's nothing for the Synthesizer
+        # to do, and waiting on its poll interval would just add latency
+        # for no benefit.
+        if any(n.type == NodeType.EXECUTE_ACTION for n in plan.nodes):
+            workflow = ctx.data.get("action_workflow")
+            run.action_workflow = workflow
+            message = _compose_action_answer(plan.transcript, workflow, run.overall_status)
+            run.answer = message
+            run.answer_text = message
+            notifier.notify(message, plan.run_id)
+
         run_store.save_run(run)
         logger.info("run_finished", overall_status=run.overall_status)
         return run
     finally:
         clear_run_context()
+
+
+def _compose_action_answer(transcript: str, workflow: ActionWorkflow | None, overall_status: str) -> str:
+    """Builds a human-readable summary of an executed/replayed
+    ActionWorkflow. No LLM call -- the outcome is a short, deterministic
+    fact (done / refused / stuck / never ran), not something that benefits
+    from drafting, and this keeps the action path independent of Lyzr/
+    OpenRouter being configured at all."""
+    if workflow is None:
+        return f'Could not complete "{transcript}": the action node did not run (status: {overall_status}).'
+
+    step_summary = "; ".join(f"{s.kind}" + (f" \"{s.reasoning}\"" if s.reasoning else "") for s in workflow.steps)
+    if workflow.success:
+        return f'Done: "{transcript}". Steps taken: {step_summary or "none"}.'
+    if workflow.refused_reason:
+        return f'Refused "{transcript}" for safety: {workflow.refused_reason}. Steps taken before refusing: {step_summary or "none"}.'
+    return f'Could not complete "{transcript}" (got stuck). Steps taken: {step_summary or "none"}.'
 
 
 def _run_node_with_retry(run: RunState, node: DAGNode, ctx: RunContext) -> None:

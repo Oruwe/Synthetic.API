@@ -116,6 +116,77 @@ def execute_action_loop(intent: str, start_url: str, run_id: str, max_steps: int
     )
 
 
+def replay_workflow(prior: ActionWorkflow, run_id: str) -> ActionWorkflow:
+    """Deterministically re-executes a previously-successful workflow's
+    recorded steps against a fresh page load -- no vision-model calls, so
+    it's fast, costs no LLM budget, and leaves no room for a newly
+    hallucinated action. This is the "Qdrant supplies the workflow" half
+    of the ambient RPA pitch: a semantically-matched past success is
+    replayed outright rather than re-explored from scratch.
+
+    A stored (x, y) sequence is only as good as the page layout it was
+    recorded against, though -- if the target moved or the flow changed,
+    blindly continuing would click the wrong thing. So ANY failure partway
+    through (a raised exception from Playwright, or the payment guard
+    tripping on a step the original run never needed to guard because it
+    took a different path) falls back to a fresh, live
+    execute_action_loop() rather than returning a partially-executed,
+    unverified workflow.
+    """
+    out_dir = Path(settings.screenshot_dir) / run_id / "action-replay"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    executed: list[ActionStep] = []
+
+    try:
+        with launched_browser(PAGE_DEFAULT_TIMEOUT_MS) as browser:
+            page = browser.new_page(viewport=_VIEWPORT)
+            page.set_default_timeout(PAGE_DEFAULT_TIMEOUT_MS)
+            page.goto(prior.start_url, wait_until="load")
+
+            for i, step in enumerate(prior.steps):
+                if step.kind in ("done", "refused", "stuck"):
+                    executed.append(step)
+                    continue
+
+                if _looks_like_payment_action(step):
+                    logger.warning("action_replay_refused_payment_guard", run_id=run_id, reasoning=step.reasoning)
+                    executed.append(
+                        ActionStep(
+                            kind="refused",
+                            reasoning="blocked by payment/checkout safety guard during replay: " + step.reasoning,
+                        )
+                    )
+                    return ActionWorkflow(
+                        run_id=run_id,
+                        intent=prior.intent,
+                        start_url=prior.start_url,
+                        steps=executed,
+                        success=False,
+                        refused_reason=executed[-1].reasoning,
+                        created_at=datetime.now(timezone.utc),
+                    )
+
+                page.screenshot(path=str(out_dir / f"step-{i:02d}.png"), full_page=False)
+                _execute_step(page, step)
+                executed.append(step)
+                time.sleep(0.3)
+
+    except Exception as exc:  # noqa: BLE001 - a stale/broken replay must fall back to live exploration, not fail
+        logger.warning("action_replay_failed_falling_back_to_live", run_id=run_id, error=str(exc))
+        return execute_action_loop(prior.intent, prior.start_url, run_id=run_id)
+
+    logger.info("action_replay_succeeded", run_id=run_id, prior_run_id=prior.run_id, step_count=len(executed))
+    return ActionWorkflow(
+        run_id=run_id,
+        intent=prior.intent,
+        start_url=prior.start_url,
+        steps=executed,
+        success=True,
+        refused_reason=None,
+        created_at=datetime.now(timezone.utc),
+    )
+
+
 def _execute_step(page, step: ActionStep) -> None:
     """Maps a step's normalized 0-1000 coordinates to real viewport pixels
     and performs it. Only reached for click/type/scroll -- the loop above

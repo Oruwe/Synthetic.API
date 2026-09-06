@@ -222,3 +222,80 @@ def test_handler_runs_with_the_calling_thread_s_bound_log_context():
     assert run.overall_status == "completed"
     assert seen_context_vars.get("run_id") == plan.run_id
     assert seen_context_vars.get("node_id") == "a"
+
+
+# --- Ambient RPA action path: execute_plan reports the answer directly ---
+
+
+def _action_workflow(success=True, refused_reason=None, run_id="r1"):
+    from agents.common.models.action import ActionStep, ActionWorkflow
+
+    return ActionWorkflow(
+        run_id=run_id,
+        intent="book a table",
+        start_url="https://example.test",
+        steps=[ActionStep(kind="click", x=1, y=1, reasoning="click search"), ActionStep(kind="done", reasoning="done")],
+        success=success,
+        refused_reason=refused_reason,
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+def test_action_plan_sets_answer_directly_without_the_synthesizer(monkeypatch):
+    """Regression test: an execute_action plan must report its outcome
+    synchronously via run.answer/answer_text -- there is no LLM drafting
+    step for it, so nothing ever writes a Qdrant point for the
+    Synthesizer's async poll loop to pick up. Without this branch, GET
+    /runs/{run_id} would return answer=None forever for every action run."""
+    key = "execute_action"
+    workflow = _action_workflow(success=True)
+    executor.register_handler(key)(lambda node, ctx: ctx.data.__setitem__("action_workflow", workflow) or True)
+    notified = {}
+    monkeypatch.setattr(
+        executor.notifier, "notify", lambda summary, run_id: notified.update(summary=summary, run_id=run_id)
+    )
+
+    action_node = DAGNode(id="act", type=NodeType.EXECUTE_ACTION, name="act", handler_key=key)
+    plan = _plan([action_node])
+
+    run = executor.execute_plan(plan)
+
+    assert run.overall_status == "completed"
+    assert run.action_workflow == workflow
+    assert run.answer is not None
+    assert run.answer == run.answer_text
+    assert "Done" in run.answer
+    assert notified.get("run_id") == plan.run_id
+
+
+def test_action_plan_reports_a_refusal_in_the_answer(monkeypatch):
+    key = "execute_action_refused"
+    workflow = _action_workflow(success=False, refused_reason="this requires entering a credit card")
+    executor.register_handler(key)(lambda node, ctx: ctx.data.__setitem__("action_workflow", workflow) or False)
+    monkeypatch.setattr(executor.notifier, "notify", lambda summary, run_id: None)
+
+    action_node = DAGNode(id="act", type=NodeType.EXECUTE_ACTION, name="act", handler_key=key)
+    plan = _plan([action_node])
+
+    run = executor.execute_plan(plan)
+
+    assert run.answer is not None
+    assert "credit card" in run.answer
+
+
+def test_action_plan_reports_gracefully_when_the_node_never_ran(monkeypatch):
+    """If the execute_action node itself fails/times out before ever
+    stashing a workflow, ctx.data has nothing -- the answer must still be
+    a clear message, not a crash on `workflow.success` against None."""
+    key = "execute_action_missing"
+    executor.register_handler(key)(lambda node, ctx: (_ for _ in ()).throw(RuntimeError("browser crashed")))
+    monkeypatch.setattr(executor.notifier, "notify", lambda summary, run_id: None)
+
+    action_node = DAGNode(id="act", type=NodeType.EXECUTE_ACTION, name="act", handler_key=key, max_retries=1)
+    plan = _plan([action_node])
+
+    run = executor.execute_plan(plan)
+
+    assert run.action_workflow is None
+    assert run.answer is not None
+    assert "did not run" in run.answer

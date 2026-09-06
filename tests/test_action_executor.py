@@ -11,8 +11,6 @@ is allowed to click/type on a real page.
 
 from contextlib import contextmanager
 
-import pytest
-
 from agents.common.models.action import ActionStep
 from agents.web_navigator import action_executor
 
@@ -233,6 +231,101 @@ def test_loop_never_raises_on_a_browser_launch_failure(tmp_path, monkeypatch):
     assert workflow.success is False
     assert workflow.steps[-1].kind == "stuck"
     assert "no chromium binary" in workflow.steps[-1].reasoning
+
+
+# --- replay_workflow ------------------------------------------------
+
+
+def _prior_workflow(steps, start_url="https://example.test"):
+    from datetime import datetime, timezone
+
+    from agents.common.models.action import ActionWorkflow
+
+    return ActionWorkflow(
+        run_id="prior-run",
+        intent="book a table",
+        start_url=start_url,
+        steps=steps,
+        success=True,
+        refused_reason=None,
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+def test_replay_workflow_reexecutes_recorded_steps_without_calling_the_model(tmp_path, monkeypatch):
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakePage()
+    _patch_browser(monkeypatch, page)
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("decide_next_action must not be called during a replay")
+
+    monkeypatch.setattr(action_executor, "decide_next_action", fail_if_called)
+
+    prior = _prior_workflow(
+        [
+            ActionStep(kind="click", x=500, y=500, reasoning="click search"),
+            ActionStep(kind="type", x=500, y=600, text="table for two", reasoning="type query"),
+            ActionStep(kind="done", reasoning="done"),
+        ]
+    )
+
+    workflow = action_executor.replay_workflow(prior, run_id="r10")
+
+    assert workflow.success is True
+    assert page.mouse.clicks == [(640.0, 400.0), (640.0, 480.0)]  # click step + type's focus-click
+    assert page.keyboard.typed == ["table for two"]
+    assert page.goto_calls == ["https://example.test"]
+
+
+def test_replay_workflow_applies_the_payment_guard_before_executing(tmp_path, monkeypatch):
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakePage()
+    _patch_browser(monkeypatch, page)
+    prior = _prior_workflow([ActionStep(kind="click", x=500, y=500, reasoning="click 'Place Order' to checkout")])
+
+    workflow = action_executor.replay_workflow(prior, run_id="r11")
+
+    assert workflow.success is False
+    assert workflow.refused_reason is not None
+    assert page.mouse.clicks == []
+
+
+def test_replay_workflow_falls_back_to_live_loop_on_failure(tmp_path, monkeypatch):
+    """A stored (x, y) sequence is only as good as the page it was recorded
+    against -- if replay execution raises partway (e.g. the page structure
+    changed), it must fall back to a fresh live loop rather than returning
+    a partial, unverified workflow."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+
+    class _BrokenPage(_FakePage):
+        def screenshot(self, path, full_page=False):
+            raise RuntimeError("page crashed mid-replay")
+
+    page = _BrokenPage()
+    _patch_browser(monkeypatch, page)
+    live_loop_calls = []
+
+    def fake_live_loop(intent, start_url, run_id, max_steps=None):
+        live_loop_calls.append((intent, start_url, run_id))
+        return action_executor.ActionWorkflow(
+            run_id=run_id, intent=intent, start_url=start_url, steps=[], success=True, refused_reason=None,
+            created_at=action_executor.datetime.now(action_executor.timezone.utc),
+        )
+
+    monkeypatch.setattr(action_executor, "execute_action_loop", fake_live_loop)
+    prior = _prior_workflow([ActionStep(kind="click", x=500, y=500, reasoning="click search")])
+
+    workflow = action_executor.replay_workflow(prior, run_id="r12")
+
+    assert live_loop_calls == [("book a table", "https://example.test", "r12")]
+    assert workflow.success is True
 
 
 def test_execute_step_type_focuses_the_field_before_typing(tmp_path, monkeypatch):
