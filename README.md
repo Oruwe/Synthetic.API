@@ -250,6 +250,18 @@ agents/synthesizer/
 
 ```bash
 cp .env.example .env    # fill in TAVILY_API_KEY, OPENROUTER_API_KEY, Langfuse keys, etc.
+```
+
+To use the real Lyzr Agent SDK rather than the OpenRouter fallback (`LYZR_ENABLED=false` skips this
+entirely and just works without it):
+
+1. Sign up / log in at [studio.lyzr.ai](https://studio.lyzr.ai) and generate an API key.
+2. Create ONE agent there whose instructions are `agents/synthesizer/drafter.py`'s
+   `_PAGE_SYSTEM_PROMPT` **verbatim** — Lyzr agents carry their persona from creation
+   time, not from a per-call system prompt (see `lyzr_wrapper.py`'s module docstring).
+3. Set `LYZR_API_KEY`, `LYZR_AGENT_ID` (that agent's id), and `LYZR_ENABLED=true` in `.env`.
+
+```bash
 docker compose up --build
 ```
 
@@ -271,7 +283,10 @@ Then:
 - `http://localhost:6333/dashboard` — Qdrant collection `web_pages`.
 - `http://localhost:3000` — Langfuse trace UI (call-level latency/tokens/cost
   for the drafting LLM call only — not where the answer itself is meant to
-  be read).
+  be read). Its `lyzr_agent_call` generation's `model` field shows
+  `lyzr:<agent id>` when the real Lyzr agent answered, or the configured
+  OpenRouter model id if it fell back — the fastest way to confirm which
+  backend actually drafted a given answer.
 - stdout of `agents-synthesizer` — the same drafted, cited answer, printed
   as it's produced (useful for following along live; `/runs/<run_id>` is
   the way to fetch it back afterward, e.g. from another process).
