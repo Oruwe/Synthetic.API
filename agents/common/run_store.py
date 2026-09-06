@@ -92,6 +92,14 @@ def create_run(plan: DAGPlan) -> RunState:
 
 
 def save_run(run: RunState) -> None:
+    # Every caller funnels through here (update_node_state, the answer
+    # persist step in synthesizer/main.py, executor.py's terminal-status
+    # writes), so this is the one place that can keep updated_at actually
+    # meaning "last modified" -- it was previously stamped once by
+    # RunState's own default_factory at construction and never touched
+    # again, so every subsequent rewrite of a run file re-serialized the
+    # same stale creation timestamp despite the file changing many times.
+    run.updated_at = datetime.now(timezone.utc)
     _write_atomic(_run_path(run.run_id), run.model_dump_json(indent=2))
     _update_index(run)
 

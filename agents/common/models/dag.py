@@ -5,7 +5,7 @@ walks it in topological order, persisting a `RunState` after every node
 transition so a run is inspectable mid-flight (`data/runs/<run_id>.json`).
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
 
@@ -94,7 +94,13 @@ class RunState(BaseModel):
     node_states: dict[str, NodeExecutionState] = Field(default_factory=dict)
     overall_status: OverallStatus = "running"
     failure_count: int = 0
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    # timezone-aware, matching every other timestamp in this codebase
+    # (FetchedPage.timestamp, NodeExecutionState.started_at, etc. all use
+    # datetime.now(timezone.utc)) -- datetime.utcnow() returns a naive
+    # datetime, which can't even be compared to an aware one without
+    # raising TypeError, caught by run_store.save_run()'s own test after
+    # that function started actually reassigning this field on every save.
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     # Set by the Synthesizer once it drafts an answer for this run (see
     # agents/synthesizer/main.py) and persisted back via run_store.save_run
     # so GET /runs/{run_id} can hand it back directly -- before this field

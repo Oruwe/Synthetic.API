@@ -35,6 +35,28 @@ def test_fetch_pages_delegates_to_page_fetcher_with_results(monkeypatch):
 
     assert ctx.data["fetched_pages"] == fake_pages
     assert "1/1" in result
+    assert node.params["sources_succeeded"] == 1
+
+
+def test_fetch_pages_records_the_actual_success_count_onto_node_params(monkeypatch):
+    """synthesizer/main.py reads this back to compute sources_succeeded --
+    must be the real fetch-success count, not an approximation derived
+    later from however many distinct URLs made it into the top-k
+    semantically-retrieved chunks (which undercounts whenever more URLs
+    fetch successfully than settings.research_top_k can represent)."""
+    fake_pages = [
+        FetchedPage(url="https://a.test", title="A", text="content", timestamp=datetime.now(timezone.utc), fetch_method="http"),
+        FetchedPage(url="https://b.test", title="B", text="", timestamp=datetime.now(timezone.utc), fetch_method="http", error="404"),
+        FetchedPage(url="https://c.test", title="C", text="content", timestamp=datetime.now(timezone.utc), fetch_method="http"),
+    ]
+    monkeypatch.setattr(page_handlers.page_fetcher, "fetch_pages", lambda results: fake_pages)
+
+    search_results = [{"title": "A", "url": "https://a.test"}, {"title": "B", "url": "https://b.test"}, {"title": "C", "url": "https://c.test"}]
+    node = type("N", (), {"params": {"question": "q", "search_results": search_results}})()
+    ctx = RunContext(run_id="r1")
+    page_handlers.handle_fetch_pages(node, ctx)
+
+    assert node.params["sources_succeeded"] == 2  # a and c succeeded, b failed
 
 
 def test_embed_pages_isolates_one_page_failure_from_the_rest(monkeypatch):

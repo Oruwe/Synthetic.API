@@ -33,6 +33,15 @@ def handle_fetch_pages(node: DAGNode, ctx: RunContext) -> str:
     pages = page_fetcher.fetch_pages(search_results)
     ctx.data["fetched_pages"] = pages
     ok = sum(1 for p in pages if p.error is None)
+    # `node` is the same object living in run.plan.nodes (not a copy), so
+    # this mutation survives run_store.save_run() and is readable later by
+    # synthesizer/main.py -- the actual fetch-success count, not the
+    # distinct-URLs-among-the-top-k-retrieved-chunks approximation it used
+    # before this existed, which undercounted whenever fetch succeeded on
+    # more URLs than settings.research_top_k (default 5) chunks could
+    # represent, showing a false "(Partial results: ...)" caveat on a
+    # fully successful fetch.
+    node.params["sources_succeeded"] = ok
     return f"fetched {ok}/{len(pages)} pages for question {question!r}"
 
 

@@ -27,7 +27,12 @@ def test_poll_once_detects_newly_completed_runs(monkeypatch):
     found = watcher.poll_once(seen)
 
     assert [r.run_id for r in found] == ["r1"]
-    assert seen == {"r1"}
+    # poll_once no longer mutates `seen` itself -- that's poll_loop's job,
+    # done only after the callback has actually processed the run (see
+    # test_poll_loop_marks_seen_only_after_the_callback_succeeds below).
+    # Marking seen here, before the run was ever handled, meant a crash
+    # between this call and the callback finishing permanently skipped it.
+    assert seen == set()
 
 
 def test_poll_once_treats_failed_and_circuit_broken_as_terminal(monkeypatch):
@@ -90,6 +95,67 @@ def test_heartbeat_write_failure_does_not_crash_the_loop(monkeypatch):
 
     # Must not raise.
     watcher.poll_loop(lambda runs: None, interval_s=0, max_iterations=1)
+
+
+def test_poll_loop_marks_seen_only_after_the_callback_succeeds(monkeypatch, tmp_path):
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "run_store_dir", str(tmp_path))
+    _mock_index(monkeypatch, {"r1": _run("r1", "completed")})
+
+    handled = []
+    watcher.poll_loop(lambda runs: handled.extend(r.run_id for r in runs), interval_s=0, max_iterations=1)
+
+    assert handled == ["r1"]
+    assert watcher._load_seen() == {"r1"}
+
+
+def test_poll_loop_does_not_mark_seen_when_the_callback_raises(monkeypatch, tmp_path):
+    """The real bug this guards against: seen was previously marked BEFORE
+    the callback ran, so a callback failure (a systemic one -- per-run
+    failures are already caught inside synthesizer/main.py and never reach
+    here) meant that run's answer was silently lost forever, never
+    retried. Now an unhandled callback exception leaves the run unseen so
+    it's picked up again on the next poll."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "run_store_dir", str(tmp_path))
+    _mock_index(monkeypatch, {"r1": _run("r1", "completed")})
+
+    def _raising_callback(runs):
+        raise RuntimeError("qdrant is down")
+
+    watcher.poll_loop(_raising_callback, interval_s=0, max_iterations=1)  # must not raise
+
+    assert watcher._load_seen() == set()  # not marked seen -- will retry next poll
+
+
+def test_load_seen_recovers_from_a_corrupt_file(tmp_path, monkeypatch):
+    """A truncated write (process killed mid-write) used to crash the whole
+    Synthesizer on every restart, since poll_loop() called _load_seen()
+    with no try/except of its own."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "run_store_dir", str(tmp_path))
+    watcher._seen_file().write_text("{not valid json")
+
+    assert watcher._load_seen() == set()  # degrades instead of raising
+
+
+def test_prune_every_n_polls_zero_never_prunes_instead_of_crashing(monkeypatch):
+    """settings.synthesizer_prune_every_n_polls == 0 used to raise
+    ZeroDivisionError, uncaught, killing the whole poll loop."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "synthesizer_prune_every_n_polls", 0)
+    _mock_index(monkeypatch, {})
+
+    prune_calls = {"count": 0}
+    monkeypatch.setattr(watcher, "_prune_old_data", lambda: prune_calls.__setitem__("count", prune_calls["count"] + 1))
+
+    watcher.poll_loop(lambda runs: None, interval_s=0, max_iterations=3)  # must not raise
+
+    assert prune_calls["count"] == 0
 
 
 def test_prune_runs_only_every_n_polls(monkeypatch):

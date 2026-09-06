@@ -140,3 +140,24 @@ def test_prune_old_runs_returns_zero_when_nothing_is_old(tmp_path, monkeypatch):
 def test_prune_old_runs_on_missing_directory_returns_zero(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "run_store_dir", str(tmp_path / "does_not_exist"))
     assert run_store.prune_old_runs(max_age_hours=24) == 0
+
+
+def test_save_run_refreshes_updated_at(tmp_path, monkeypatch):
+    """updated_at used to be stamped once by RunState's own default_factory
+    at construction and never touched again, so every later save()
+    re-serialized the same stale creation timestamp despite the run file
+    genuinely changing -- any future consumer reading it to judge recency
+    would see creation time, not last-modified time."""
+    monkeypatch.setattr(settings, "run_store_dir", str(tmp_path))
+    run = run_store.create_run(_plan("r1"))
+    original_updated_at = run.updated_at
+
+    import time
+
+    time.sleep(0.01)
+    run.overall_status = "completed"
+    run_store.save_run(run)
+
+    assert run.updated_at > original_updated_at
+    reloaded = run_store.load_run("r1")
+    assert reloaded.updated_at > original_updated_at

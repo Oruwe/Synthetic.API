@@ -21,7 +21,18 @@ def _handle_completed_runs(runs: list[RunState]) -> None:
 
         logger.info("drafting_answer", run_id=run.run_id, overall_status=run.overall_status, question=question)
         chunks = qdrant_store.semantic_search_pages(run.run_id, question)
-        sources_succeeded = len({c.payload.get("url") for c in chunks if c.payload and c.payload.get("url")})
+        # Prefer the fetch node's own recorded success count (set by
+        # page_handlers.handle_fetch_pages -- the actual number of pages
+        # that fetched without error) over counting distinct URLs among
+        # the top-k *retrieved* chunks: that undercounted whenever fetch
+        # succeeded on more URLs than settings.research_top_k (default 5)
+        # chunks could represent, showing a false "(Partial results:
+        # ...)" caveat on a fully successful fetch. Fall back to the old
+        # approximation only for a run persisted before this field existed.
+        if fetch_node is not None and "sources_succeeded" in fetch_node.params:
+            sources_succeeded = fetch_node.params["sources_succeeded"]
+        else:
+            sources_succeeded = len({c.payload.get("url") for c in chunks if c.payload and c.payload.get("url")})
 
         drafted = drafter.draft_answer(
             chunks,

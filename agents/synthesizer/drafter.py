@@ -30,18 +30,32 @@ _SYSTEM_PROMPT = (
 )
 
 
+def _flagged_field_names(flags: list[str] | None) -> set[str]:
+    """extractor.py/research_handlers.py record hits as "pattern:field_name"
+    (see guard.py). Parsing this out lets redaction target the SPECIFIC
+    field(s) a hit was found in, rather than blanking one hardcoded field
+    regardless of which one was actually flagged -- redacting the wrong
+    field left the real adversarial content untouched and still sent to
+    the LLM, defeating this module's own "belt-and-suspenders" redaction."""
+    return {flag.split(":", 1)[1] for flag in (flags or []) if ":" in flag}
+
+
 def _order_to_prompt_dict(record: qm.Record) -> dict:
     payload = record.payload
-    flagged = bool(payload.get("flags"))
-    delay_reason = payload.get("delay_reason")
-    if flagged:
-        delay_reason = f"[REDACTED: flagged content, see logs for run {payload.get('run_id')}]"
+    flagged_fields = _flagged_field_names(payload.get("flags"))
+    run_id = payload.get("run_id")
+
+    def _value(field_name: str):
+        if field_name in flagged_fields:
+            return f"[REDACTED: flagged content, see logs for run {run_id}]"
+        return payload.get(field_name)
+
     return {
         "order_id": payload.get("order_id"),
-        "customer_name": payload.get("customer_name"),
-        "destination": payload.get("destination"),
-        "carrier": payload.get("carrier"),
-        "delay_reason": delay_reason,
+        "customer_name": _value("customer_name"),
+        "destination": _value("destination"),
+        "carrier": _value("carrier"),
+        "delay_reason": _value("delay_reason"),
     }
 
 
@@ -86,15 +100,23 @@ _RESEARCH_SYSTEM_PROMPT = (
 
 def _finding_to_prompt_dict(record: qm.Record) -> dict:
     payload = record.payload
-    flagged = bool(payload.get("flags"))
-    summary = payload.get("summary")
-    if flagged:
-        summary = f"[REDACTED: flagged content, see logs for run {payload.get('run_id')}]"
+    flagged_fields = _flagged_field_names(payload.get("flags"))
+    run_id = payload.get("run_id")
+
+    def _value(field_name: str):
+        if field_name in flagged_fields:
+            return f"[REDACTED: flagged content, see logs for run {run_id}]"
+        return payload.get(field_name)
+
     return {
         "url": payload.get("url"),
-        "title": payload.get("title"),
-        "summary": summary,
-        "key_facts": [] if flagged else (payload.get("key_facts") or []),
+        "title": _value("title"),
+        "summary": _value("summary"),
+        # key_facts isn't itself guard-scanned (see research_handlers.py's
+        # _SCANNED_FIELDS -- only title/summary are) -- dropped entirely on
+        # any hit in this finding as a conservative belt-and-suspenders
+        # measure, same as before, not because it's independently flagged.
+        "key_facts": [] if flagged_fields else (payload.get("key_facts") or []),
     }
 
 

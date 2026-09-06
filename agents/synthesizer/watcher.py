@@ -32,6 +32,7 @@ from typing import Callable
 from agents.common import qdrant_store, run_store
 from agents.common.config import settings
 from agents.common.logging import get_logger
+from agents.common.run_store import _write_atomic
 
 logger = get_logger(component="watcher")
 
@@ -63,18 +64,34 @@ def _write_heartbeat() -> None:
 
 def _load_seen() -> set[str]:
     path = _seen_file()
-    if path.exists():
+    if not path.exists():
+        return set()
+    try:
         return set(json.loads(path.read_text()))
-    return set()
+    except Exception as exc:  # noqa: BLE001 - a corrupt seen-file must degrade, not crash-loop the Synthesizer
+        # A truncated write here (process killed mid-write) used to crash
+        # the whole Synthesizer on every restart, since poll_loop() called
+        # this with no try/except of its own -- unlike every other
+        # persistence path in this codebase (run_store._write_atomic is
+        # used precisely to avoid this class of bug; _save_seen below now
+        # reuses it for the same reason).
+        logger.warning("seen_runs_file_corrupt_starting_fresh", error=str(exc))
+        return set()
 
 
 def _save_seen(seen: set[str]) -> None:
-    path = _seen_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(sorted(seen)))
+    _write_atomic(_seen_file(), json.dumps(sorted(seen)))
 
 
 def poll_once(seen: set[str]) -> list[run_store.RunState]:
+    """Returns newly-terminal runs not yet in `seen` -- does NOT mark them
+    seen itself. That's poll_loop()'s job, done only once on_completed_runs
+    has actually processed them: marking a run "seen" before it's actually
+    been handled means a crash (or any exception raised by the callback)
+    between this call and the callback finishing permanently skips that
+    run's answer -- the exact "silently never gets an answer" failure mode
+    the seen-file is supposed to protect against re-triggering, not cause.
+    """
     new_runs: list[run_store.RunState] = []
     for run_id, summary in run_store.list_run_summaries().items():
         if run_id in seen or summary.get("overall_status") not in _TERMINAL_STATUSES:
@@ -82,10 +99,7 @@ def poll_once(seen: set[str]) -> list[run_store.RunState]:
         run = run_store.load_run(run_id)
         if run is None:  # file vanished between the index read and now -- skip, don't crash
             continue
-        seen.add(run_id)
         new_runs.append(run)
-    if new_runs:
-        _save_seen(seen)
     return new_runs
 
 
@@ -122,11 +136,27 @@ def poll_loop(
             if new_runs:
                 logger.info("new_completed_runs_detected", count=len(new_runs))
                 on_completed_runs(new_runs)
+                # Marked seen only AFTER the callback returns -- if it
+                # raises partway through (a systemic failure; per-run
+                # failures are already caught inside
+                # synthesizer/main.py's _handle_completed_runs and never
+                # reach here), none of this batch is marked seen and all
+                # of it is retried next poll. Reprocessing an
+                # already-successfully-handled run wastes one redraft;
+                # the alternative (the old behavior) was silently losing
+                # it forever, a strictly worse failure mode.
+                seen.update(run.run_id for run in new_runs)
+                _save_seen(seen)
         except Exception as exc:  # noqa: BLE001 - one bad poll must not kill the loop
             logger.warning("watcher_poll_error", error=str(exc))
 
         iteration += 1
-        if iteration % settings.synthesizer_prune_every_n_polls == 0:
+        # settings.synthesizer_prune_every_n_polls == 0 previously raised
+        # ZeroDivisionError here -- uncaught (this line sits after the
+        # try/except above), killing the whole poll loop on a
+        # misconfiguration that every other failure path in this file
+        # degrades gracefully from instead. Treat 0 as "never prune".
+        if settings.synthesizer_prune_every_n_polls > 0 and iteration % settings.synthesizer_prune_every_n_polls == 0:
             _prune_old_data()
 
         if max_iterations is None or iteration < max_iterations:

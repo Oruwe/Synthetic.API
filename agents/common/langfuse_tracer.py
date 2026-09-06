@@ -47,12 +47,27 @@ def _model_usage(usage: dict | None):
     """Builds a langfuse.model.ModelUsage from the {"input","output","total"}
     dict backends attach to LLMResult (see lyzr_wrapper.py). Returns None if
     there's nothing to report, rather than sending a bogus all-zero usage
-    that would show up on the trace looking like a real (empty) call."""
+    that would show up on the trace looking like a real (empty) call.
+
+    Called OUTSIDE _safe() at both call sites below (building the kwargs
+    for trace.generation(), before entering the _safe(lambda: ...) call),
+    so it must never raise on its own -- confirmed live: LyzrBackend's
+    usage dict is opportunistic and unverified (see lyzr_wrapper.py's
+    module docstring), and if it ever happened to include a "unit" key,
+    `ModelUsage(unit="TOKENS", **usage)` raises TypeError (duplicate
+    keyword) with nothing here to catch it, discarding an otherwise-
+    successful LLM answer up in drafter.py's own try/except and silently
+    downgrading to the template fallback.
+    """
     if not usage:
         return None
-    from langfuse.model import ModelUsage
+    try:
+        from langfuse.model import ModelUsage
 
-    return ModelUsage(unit="TOKENS", **usage)
+        return ModelUsage(unit="TOKENS", **usage)
+    except Exception as exc:  # noqa: BLE001 - tracing must never break the pipeline (see module docstring)
+        logger.warning("langfuse_model_usage_build_failed", error=str(exc))
+        return None
 
 
 def traced_llm_call(name: str) -> Callable:
