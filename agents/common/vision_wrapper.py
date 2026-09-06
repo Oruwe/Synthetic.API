@@ -39,6 +39,11 @@ _ANALYSIS_SYSTEM_PROMPT = (
 class VisionAgentWrapper:
     def __init__(self):
         self.model = settings.openrouter_vision_model
+        # Stashed on every call so @traced_vision_call (langfuse_tracer.py)
+        # can report the real model/token counts on the trace instead of a
+        # generation showing 0 tokens / $0.00 regardless of the real call.
+        self.last_model: str | None = None
+        self.last_usage: dict | None = None
 
     @traced_vision_call(name="vision_analyze_screenshot")
     def analyze(self, image_ref: str, prompt: str, *, run_id: str, node_id: str) -> str:
@@ -71,6 +76,13 @@ class VisionAgentWrapper:
                 },
             ],
         )
+        self.last_model = self.model
+        if response.usage is not None:
+            self.last_usage = {
+                "input": response.usage.prompt_tokens,
+                "output": response.usage.completion_tokens,
+                "total": response.usage.total_tokens,
+            }
         return response.choices[0].message.content or ""
 
 

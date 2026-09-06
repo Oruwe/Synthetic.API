@@ -10,7 +10,7 @@ caller.
 """
 
 import functools
-import time
+from datetime import datetime, timezone
 from typing import Callable
 
 from agents.common.config import settings
@@ -43,12 +43,24 @@ def _get_client():
     return _langfuse_client
 
 
+def _model_usage(usage: dict | None):
+    """Builds a langfuse.model.ModelUsage from the {"input","output","total"}
+    dict backends attach to LLMResult (see lyzr_wrapper.py). Returns None if
+    there's nothing to report, rather than sending a bogus all-zero usage
+    that would show up on the trace looking like a real (empty) call."""
+    if not usage:
+        return None
+    from langfuse.model import ModelUsage
+
+    return ModelUsage(unit="TOKENS", **usage)
+
+
 def traced_llm_call(name: str) -> Callable:
     def decorator(fn: Callable) -> Callable:
         @functools.wraps(fn)
         def wrapper(self, system_prompt: str, user_input: str, *, run_id: str, node_id: str):
             client = _get_client()
-            started = time.monotonic()
+            started_at = datetime.now(timezone.utc)
             trace = None
             if client is not None:
                 try:
@@ -64,13 +76,24 @@ def traced_llm_call(name: str) -> Callable:
                 raise
             else:
                 if trace is not None:
-                    latency_ms = (time.monotonic() - started) * 1000
+                    ended_at = datetime.now(timezone.utc)
+                    # Set by LyzrAgentWrapper.run() (lyzr_wrapper.py) during
+                    # the call above -- without these, every generation
+                    # showed 0 tokens / $0.00 regardless of the real call,
+                    # since start_time==end_time and no model/usage was
+                    # ever passed to Langfuse.
+                    model = getattr(self, "last_model", None)
+                    usage = _model_usage(getattr(self, "last_usage", None))
                     _safe(
                         lambda: trace.generation(
                             name=name,
                             input=user_input,
                             output=result,
-                            metadata={"latency_ms": latency_ms},
+                            model=model,
+                            usage=usage,
+                            start_time=started_at,
+                            end_time=ended_at,
+                            metadata={"latency_ms": (ended_at - started_at).total_seconds() * 1000},
                         )
                     )
                 return result
@@ -90,7 +113,7 @@ def traced_vision_call(name: str) -> Callable:
         @functools.wraps(fn)
         def wrapper(self, image_ref: str, prompt: str, *, run_id: str, node_id: str):
             client = _get_client()
-            started = time.monotonic()
+            started_at = datetime.now(timezone.utc)
             trace = None
             if client is not None:
                 try:
@@ -106,13 +129,19 @@ def traced_vision_call(name: str) -> Callable:
                 raise
             else:
                 if trace is not None:
-                    latency_ms = (time.monotonic() - started) * 1000
+                    ended_at = datetime.now(timezone.utc)
+                    model = getattr(self, "last_model", None)
+                    usage = _model_usage(getattr(self, "last_usage", None))
                     _safe(
                         lambda: trace.generation(
                             name=name,
                             input={"image_ref": image_ref, "prompt": prompt},
                             output=result,
-                            metadata={"latency_ms": latency_ms},
+                            model=model,
+                            usage=usage,
+                            start_time=started_at,
+                            end_time=ended_at,
+                            metadata={"latency_ms": (ended_at - started_at).total_seconds() * 1000},
                         )
                     )
                 return result

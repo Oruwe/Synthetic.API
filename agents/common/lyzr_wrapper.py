@@ -20,6 +20,7 @@ which matters for the open-source story as much as the code being public.
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 from agents.common.config import settings
 from agents.common.langfuse_tracer import traced_llm_call
@@ -28,9 +29,21 @@ from agents.common.logging import get_logger
 logger = get_logger(component="lyzr_wrapper")
 
 
+@dataclass
+class LLMResult:
+    """What a backend actually produced, not just the text -- so the
+    Langfuse trace (see langfuse_tracer.py) can report the real model name
+    and token counts instead of showing a generation with 0 tokens / $0.00
+    for every call, which is what happened before this existed."""
+
+    text: str
+    model: str | None = None
+    usage: dict | None = None  # {"input": int, "output": int, "total": int}
+
+
 class LLMBackend(ABC):
     @abstractmethod
-    def complete(self, system_prompt: str, user_input: str) -> str: ...
+    def complete(self, system_prompt: str, user_input: str) -> LLMResult: ...
 
 
 class LyzrBackend(LLMBackend):
@@ -44,7 +57,7 @@ class LyzrBackend(LLMBackend):
         # TODO(verify): e.g. `from lyzr import Agent` / `LyzrAgentAPI(...)`
         # and construct the real client here.
 
-    def complete(self, system_prompt: str, user_input: str) -> str:
+    def complete(self, system_prompt: str, user_input: str) -> LLMResult:
         raise NotImplementedError(
             "Lyzr SDK call not wired yet — verify method names against the "
             "hackathon starter kit, then implement here."
@@ -67,7 +80,7 @@ class OpenRouterBackend(LLMBackend):
     "deepseek/deepseek-chat-v3.1:free") uses OpenRouter's free tier.
     """
 
-    def complete(self, system_prompt: str, user_input: str) -> str:
+    def complete(self, system_prompt: str, user_input: str) -> LLMResult:
         if not settings.openrouter_api_key:
             raise RuntimeError(
                 "No LYZR_API_KEY and no OPENROUTER_API_KEY configured — "
@@ -90,7 +103,15 @@ class OpenRouterBackend(LLMBackend):
                 {"role": "user", "content": user_input},
             ],
         )
-        return response.choices[0].message.content or ""
+        text = response.choices[0].message.content or ""
+        usage = None
+        if response.usage is not None:
+            usage = {
+                "input": response.usage.prompt_tokens,
+                "output": response.usage.completion_tokens,
+                "total": response.usage.total_tokens,
+            }
+        return LLMResult(text=text, model=settings.openrouter_model, usage=usage)
 
 
 class LyzrAgentWrapper:
@@ -102,12 +123,21 @@ class LyzrAgentWrapper:
             LyzrBackend(settings.lyzr_api_key, agent_role) if settings.lyzr_enabled else None
         )
         self._fallback = OpenRouterBackend()
+        # Stashed by run() on every call so the @traced_llm_call decorator
+        # (langfuse_tracer.py) -- which only sees this method's string
+        # return value -- can still report the real model name and token
+        # counts on the trace, instead of a generation showing 0 tokens /
+        # $0.00 for every call regardless of what actually happened.
+        self.last_model: str | None = None
+        self.last_usage: dict | None = None
 
     @traced_llm_call(name="lyzr_agent_call")
     def run(self, system_prompt: str, user_input: str, *, run_id: str, node_id: str) -> str:
         if self._primary is not None:
             try:
-                return self._primary.complete(system_prompt, user_input)
+                result = self._primary.complete(system_prompt, user_input)
+                self.last_model, self.last_usage = result.model, result.usage
+                return result.text
             except Exception as exc:  # noqa: BLE001 - deliberately broad: never let an
                 # unconfirmed SDK failure take the whole pipeline down.
                 logger.warning(
@@ -117,4 +147,6 @@ class LyzrAgentWrapper:
                     agent_role=self.agent_role,
                     error=str(exc),
                 )
-        return self._fallback.complete(system_prompt, user_input)
+        result = self._fallback.complete(system_prompt, user_input)
+        self.last_model, self.last_usage = result.model, result.usage
+        return result.text
