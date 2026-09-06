@@ -12,6 +12,9 @@ piling up near-duplicate points. See WorkflowMemory's own docstring
 (agents/common/models/action.py) for the full design rationale.
 """
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -138,6 +141,31 @@ def test_record_workflow_outcome_erodes_trust_on_failure_without_losing_the_repl
     assert len(memory.steps) == 2  # still the good sequence from the successful attempt
 
 
+def test_record_workflow_outcome_does_not_let_a_failure_overwrite_start_url_or_last_success(monkeypatch):
+    """Regression test: a failed attempt used to unconditionally overwrite
+    `start_url` and `last_success_at` even though it never verified
+    anything -- only `memory.steps` was actually gated on `workflow.success`.
+    A failed attempt (e.g. against a redirected/different start_url) must
+    leave both fields exactly as the last SUCCESSFUL attempt set them."""
+    monkeypatch.setattr(qdrant_store, "embed_text", lambda text: [1.0, 0.0])
+    client = FakeClient()
+    monkeypatch.setattr(qdrant_store, "_client", client)
+
+    first = qdrant_store.record_workflow_outcome(
+        _workflow(success=True, start_url="https://flights.test/search"), client=client
+    )
+    assert first.last_success_at is not None
+    first_success_at = first.last_success_at
+    first_start_url = first.start_url
+
+    failed = qdrant_store.record_workflow_outcome(
+        _workflow(success=False, start_url="https://flights.test/DIFFERENT-redirect"), client=client
+    )
+
+    assert failed.start_url == first_start_url  # NOT overwritten by the failed attempt's start_url
+    assert failed.last_success_at == first_success_at  # NOT bumped to "now" by a failure
+
+
 def test_record_workflow_outcome_never_raises_on_qdrant_failure(monkeypatch):
     class BrokenClient(FakeClient):
         def upsert(self, **kwargs):
@@ -151,6 +179,58 @@ def test_record_workflow_outcome_never_raises_on_qdrant_failure(monkeypatch):
 
     assert memory is not None  # still returns a usable in-memory record
     assert memory.success_count == 1
+
+
+# --- concurrency: the per-canonical-key lock actually closes the race ----
+
+
+class _RaceProneFakeClient(FakeClient):
+    """Same as FakeClient, but retrieve() sleeps briefly to force real
+    thread interleaving between the read and write halves of
+    record_workflow_outcome's read-merge-write. Without qdrant_store's own
+    per-key lock, running N threads through this reliably reproduces a
+    lost update (two threads both read success_count=K, both write back
+    K+1, one increment vanishes) -- this test would flake/fail without
+    the lock and passes reliably with it."""
+
+    def retrieve(self, **kwargs):
+        result = super().retrieve(**kwargs)
+        time.sleep(0.01)
+        return result
+
+
+def test_record_workflow_outcome_has_no_lost_updates_under_real_concurrency(monkeypatch):
+    """The concurrency proof: N real threads recording a successful
+    attempt against the exact same (domain, intent) pair at the same time
+    must end with success_count == N -- not fewer, which is what a lost
+    update looks like."""
+    monkeypatch.setattr(qdrant_store, "embed_text", lambda text: [1.0, 0.0])
+    client = _RaceProneFakeClient()
+    monkeypatch.setattr(qdrant_store, "_client", client)
+    n = 20
+
+    with ThreadPoolExecutor(max_workers=n) as pool:
+        list(pool.map(lambda _: qdrant_store.record_workflow_outcome(_workflow(success=True), client=client), range(n)))
+
+    point_id = qdrant_store._stable_uuid(qdrant_store._canonical_key("flights.test", "find the cheapest flight to Goa"))
+    final = qdrant_store._load_workflow_memory(client, point_id)
+
+    assert final.success_count == n
+    assert len(client._points) == 1  # still one canonical record, not N
+
+
+def test_lock_for_workflow_is_per_key_not_shared_across_unrelated_keys():
+    """The lock granularity itself: two different canonical keys must get
+    two different Lock objects (so unrelated tasks never serialize behind
+    each other), while the SAME key always gets back the SAME Lock object
+    (so contention on that key is actually caught)."""
+    lock_a1 = qdrant_store._lock_for_workflow("point-a")
+    lock_a2 = qdrant_store._lock_for_workflow("point-a")
+    lock_b = qdrant_store._lock_for_workflow("point-b")
+
+    assert lock_a1 is lock_a2
+    assert lock_a1 is not lock_b
+    assert isinstance(lock_a1, type(threading.Lock()))
 
 
 # --- find_workflow_memory --------------------------------------------------

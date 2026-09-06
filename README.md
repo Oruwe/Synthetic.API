@@ -245,6 +245,19 @@ erode it. That's a log, not memory. The rebuild (`WorkflowMemory` in
   `prune_old_page_chunks`/`prune_old_runs`) deletes records that are both
   old *and* never earned trust — a record that stays trustworthy is never
   deleted, no matter its age.
+- **Concurrency-safe in-place updates.** Two attempts against the *same*
+  (domain, intent) pair completing around the same moment both do a
+  read-merge-write against one Qdrant point — without serializing that,
+  it's a textbook lost-update race. Qdrant has no compare-and-swap
+  primitive to lean on, so `record_workflow_outcome` closes it with a
+  per-canonical-key in-process lock. Proven, not just argued:
+  `test_record_workflow_outcome_has_no_lost_updates_under_real_concurrency`
+  runs 20 real threads at the same record at once — with the lock
+  disabled it reliably drops to `success_count == 2`; with it, `== 20`
+  every time. Honest scope limit: this covers the deployment that
+  actually exists (one orchestrator process, node handlers racing inside
+  its `ThreadPoolExecutor`) — a future multi-replica orchestrator would
+  need cross-process coordination this in-process lock can't provide.
 
 Deliberately kept off `main` on its own branch (`feature/ambient-rpa-
 action-bridge`) so it can be discarded cleanly if it doesn't pan out —

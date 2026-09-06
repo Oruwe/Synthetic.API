@@ -48,6 +48,34 @@ _embedder: TextEmbedding | None = None
 _client_lock = threading.Lock()
 _embedder_lock = threading.Lock()
 
+# Per-canonical-key locks guarding record_workflow_outcome's read-merge-
+# write below -- see that function's docstring for why a plain upsert
+# isn't safe here. One lock per key (not one global lock like
+# run_store._index_lock) because record_workflow_outcome's actual hazard
+# is two attempts racing on the SAME (domain, intent) pair; two DIFFERENT
+# tasks completing at the same moment touch different Qdrant points and
+# have no reason to serialize behind each other.
+#
+# Known, accepted limitation: this protects the realistic concurrency
+# case for how this system actually runs today -- one orchestrator
+# process, node handlers racing inside its ThreadPoolExecutor (see
+# executor.py) -- NOT a future multi-replica orchestrator, which would
+# need cross-process coordination (e.g. Redis, or a real compare-and-set
+# primitive) this in-process dict can't provide. Qdrant itself has no
+# CAS/optimistic-locking primitive to lean on instead, so an in-process
+# lock is the honest fix for the deployment topology that exists, not a
+# pretend fix for one that doesn't.
+_workflow_memory_locks: dict[str, threading.Lock] = {}
+_workflow_memory_locks_meta_lock = threading.Lock()
+
+
+def _lock_for_workflow(point_id: str) -> threading.Lock:
+    lock = _workflow_memory_locks.get(point_id)
+    if lock is None:
+        with _workflow_memory_locks_meta_lock:
+            lock = _workflow_memory_locks.setdefault(point_id, threading.Lock())
+    return lock
+
 
 def get_client() -> QdrantClient:
     global _client
@@ -487,6 +515,15 @@ def record_workflow_outcome(workflow: ActionWorkflow, client: QdrantClient | Non
     against an otherwise-reliable workflow erodes its trust score without
     destroying the thing that made it trustworthy in the first place.
 
+    Concurrency: two attempts against the SAME (domain, intent) pair
+    completing around the same time both do read-merge-write against one
+    Qdrant point -- without serializing that critical section, the
+    classic lost-update race applies (both read success_count=N, both
+    write back N+1, one increment vanishes). Qdrant has no compare-and-set
+    primitive to lean on instead, so this is closed with an in-process
+    per-point lock (see `_lock_for_workflow` above and its docstring for
+    what this does and does not cover).
+
     Never raises: a Qdrant outage here must not lose the fact that a real
     browser action already happened in the physical world, so the caller
     (action_handlers.py) has the workflow either way and persisting the
@@ -518,28 +555,33 @@ def record_workflow_outcome(workflow: ActionWorkflow, client: QdrantClient | Non
 
     try:
         ensure_collection(settings.qdrant_action_workflows_collection, client)
-        existing = _load_workflow_memory(client, point_id)
+        with _lock_for_workflow(point_id):
+            existing = _load_workflow_memory(client, point_id)
 
-        if existing is None:
-            memory = _fresh_memory()
-        else:
-            memory = existing.model_copy(
-                update={
-                    "last_used_at": now,
-                    "success_count": existing.success_count + (1 if workflow.success else 0),
-                    "failure_count": existing.failure_count + (0 if workflow.success else 1),
-                }
+            if existing is None:
+                memory = _fresh_memory()
+            else:
+                memory = existing.model_copy(
+                    update={
+                        "last_used_at": now,
+                        "success_count": existing.success_count + (1 if workflow.success else 0),
+                        "failure_count": existing.failure_count + (0 if workflow.success else 1),
+                    }
+                )
+                if workflow.success:
+                    memory.steps = workflow.steps
+                    memory.start_url = workflow.start_url
+                    memory.last_success_at = now
+
+            # The upsert (the "write" half of read-merge-write) MUST stay
+            # inside the lock too -- releasing it after the merge and
+            # before the write would reopen exactly the race this lock
+            # exists to close.
+            vector = embed_text(memory.representative_intent)
+            client.upsert(
+                collection_name=settings.qdrant_action_workflows_collection,
+                points=[qm.PointStruct(id=point_id, vector=vector, payload=memory.model_dump(mode="json"))],
             )
-            if workflow.success:
-                memory.steps = workflow.steps
-                memory.start_url = workflow.start_url
-                memory.last_success_at = now
-
-        vector = embed_text(memory.representative_intent)
-        client.upsert(
-            collection_name=settings.qdrant_action_workflows_collection,
-            points=[qm.PointStruct(id=point_id, vector=vector, payload=memory.model_dump(mode="json"))],
-        )
         logger.info(
             "workflow_memory_recorded",
             canonical_key=key,
