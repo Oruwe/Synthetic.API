@@ -244,6 +244,9 @@ agents/synthesizer/
   watcher.py               polls run_store's index for newly-completed runs,
                           writes a heartbeat file, sweeps retention periodically
   drafter.py                draft_answer(): semantic retrieval, cited, partial-results-aware
+ui/
+  app.py                   Gradio demo UI -- calls the Orchestrator's HTTP API only,
+                          see "Voice & UI" below
 ```
 
 ## Running it
@@ -290,6 +293,34 @@ Then:
 - stdout of `agents-synthesizer` — the same drafted, cited answer, printed
   as it's produced (useful for following along live; `/runs/<run_id>` is
   the way to fetch it back afterward, e.g. from another process).
+- `http://localhost:7860` — a small Gradio demo UI (type a question, watch
+  it work, read the cited answer) for anyone who'd rather not use curl.
+  See "Voice & UI" below for what it is and isn't.
+
+## Voice & UI
+
+`docker compose up` also starts a demo UI at `http://localhost:7860`
+(`ui/app.py`) — purely additive, it only calls the Orchestrator's existing
+`/trigger` and `/runs/{id}` HTTP API, so it carries zero risk to the
+pipeline itself.
+
+Two deliberate, honest choices worth knowing about:
+
+- **Speech-to-text isn't this project's job.** In the real deployment,
+  Omi's own wearable/app transcribes your voice and POSTs the resulting
+  transcript straight to `/webhook/omi` — this project never touches raw
+  audio. The UI's text box (and `scripts/send_sample_transcript.sh` on the
+  CLI) is the same "already-transcribed question" input, just typed for
+  local dev/demo convenience instead of spoken through real Omi hardware.
+- **Text-to-speech uses the browser, not a guessed Omi API.** Whether
+  Omi's own API supports pushing a spoken response back to the wearable
+  isn't something verifiable from outside a real device/account, and
+  building a speculative pipeline against an unconfirmed contract wasn't
+  worth the risk this close to a deadline. The UI's "🔊 Read answer aloud"
+  button instead uses the browser's native `SpeechSynthesis` API
+  client-side — zero backend, zero new dependency, works today, and is
+  honest about being a demo convenience rather than a real Omi
+  integration.
 
 ## Testing
 

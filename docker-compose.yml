@@ -125,6 +125,22 @@ services:
       retries: 6
       start_period: 15s
 
+  # --- Demo UI (optional, purely additive) --------------------------------
+  # Talks ONLY to the Orchestrator's existing HTTP API (/trigger,
+  # /runs/{id}) over the network -- no direct Qdrant/run_store access --
+  # so it carries zero risk to the pipeline itself. Exists because
+  # curl/bash scripts aren't a great surface for a judge or a live demo.
+  # See ui/app.py for why voice input/output are handled the way they are.
+  demo-ui:
+    build: ./ui
+    ports:
+      - "7860:7860"
+    environment:
+      ORCHESTRATOR_URL: http://agents-orchestrator:8000
+    depends_on:
+      agents-orchestrator:
+        condition: service_started
+
 volumes:
   qdrant_storage:
   postgres_data:
