@@ -77,7 +77,19 @@ def ask(question: str):
 
     yield f"🛰️ Run `{run_id}` started — searching the web, fetching pages, and embedding...", "", ""
 
+    # The DAG (fetch -> embed) finishing and the Synthesizer actually
+    # drafting an answer are two SEPARATE, asynchronous steps: the
+    # Orchestrator marks overall_status "completed" the instant the DAG
+    # itself is done, but the Synthesizer only notices and starts drafting
+    # on its own next poll cycle (every ~5s, see watcher.py) and then the
+    # LLM call itself still takes real time. Caught live: this loop used
+    # to stop the moment overall_status went terminal and report "no
+    # answer was recorded" if the Synthesizer simply hadn't caught up yet
+    # -- not a real failure, just polling for the wrong signal. Now it
+    # keeps polling for the answer specifically, using the DAG's terminal
+    # status only to change the status message, not to stop early.
     waited = 0.0
+    dag_finished_status: str | None = None
     while waited < _MAX_WAIT_SECONDS:
         time.sleep(_POLL_INTERVAL_SECONDS)
         waited += _POLL_INTERVAL_SECONDS
@@ -90,25 +102,33 @@ def ask(question: str):
 
         run = run_resp.json()
         status = run.get("overall_status")
-        if status in ("completed", "failed", "circuit_broken", "no_capability"):
-            # answer_text (no footer) is what should be displayed/read aloud;
-            # fall back to the older flattened `answer` field for runs
-            # persisted before this field existed.
-            answer_text = run.get("answer_text") or run.get("answer")
-            if answer_text:
-                sources_md = _format_sources_markdown(
-                    run.get("sources") or [], run.get("sources_attempted"), run.get("sources_succeeded")
-                )
-                yield f"✅ Done (`{status}`, {waited:.0f}s elapsed).", answer_text, sources_md
-            else:
-                yield f"⚠️ Run finished with status `{status}` but no answer was recorded.", "", ""
+        # answer_text (no footer) is what should be displayed/read aloud;
+        # fall back to the older flattened `answer` field for runs
+        # persisted before this field existed.
+        answer_text = run.get("answer_text") or run.get("answer")
+        if answer_text:
+            sources_md = _format_sources_markdown(
+                run.get("sources") or [], run.get("sources_attempted"), run.get("sources_succeeded")
+            )
+            yield f"✅ Done (`{status}`, {waited:.0f}s elapsed).", answer_text, sources_md
             return
 
-        yield f"⏳ Still working... (`{status}`, {waited:.0f}s elapsed)", "", ""
+        if dag_finished_status is None and status in ("completed", "failed", "circuit_broken", "no_capability"):
+            dag_finished_status = status
+
+        if dag_finished_status is not None:
+            yield (
+                f"⏳ Search/fetch/embed finished (`{dag_finished_status}`) — waiting for the "
+                f"Synthesizer to draft the answer... ({waited:.0f}s elapsed)",
+                "",
+                "",
+            )
+        else:
+            yield f"⏳ Still working... (`{status}`, {waited:.0f}s elapsed)", "", ""
 
     yield (
-        f"⚠️ Timed out after {_MAX_WAIT_SECONDS}s waiting for run `{run_id}` — "
-        f"check `docker compose logs` or poll `/runs/{run_id}` directly.",
+        f"⚠️ Timed out after {_MAX_WAIT_SECONDS}s waiting for run `{run_id}`'s answer — "
+        f"check `docker compose logs agents-synthesizer` or poll `/runs/{run_id}` directly.",
         "",
         "",
     )
