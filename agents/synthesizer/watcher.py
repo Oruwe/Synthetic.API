@@ -55,9 +55,14 @@ def _write_heartbeat() -> None:
     docker-compose's healthcheck for this service checks the file's
     recency (see docker-compose.yml)."""
     try:
-        path = _heartbeat_file()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"last_poll_at": time.time()}))
+        # _write_atomic (write-to-tmp + os.replace), not a plain
+        # write_text(): the docker-compose healthcheck reads and
+        # json.loads() this file every 10s from another process, so a
+        # direct write_text() risks the same torn-read class of bug
+        # _load_seen()'s docstring above describes for the seen-runs file
+        # -- a healthcheck read landing mid-write would see a truncated
+        # file and raise, flapping the container's health status.
+        _write_atomic(_heartbeat_file(), json.dumps({"last_poll_at": time.time()}))
     except Exception as exc:  # noqa: BLE001 - a heartbeat write failing must not kill the loop
         logger.warning("heartbeat_write_failed", error=str(exc))
 

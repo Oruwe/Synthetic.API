@@ -1,4 +1,4 @@
-.PHONY: up down logs test lint demo
+.PHONY: up down logs test demo
 
 up:
 	docker compose up --build
