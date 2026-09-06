@@ -25,6 +25,25 @@ services:
       timeout: 5s
       retries: 10
 
+  # --- Ambient RPA demo/test target (feature/ambient-rpa-action-bridge
+  # only) ---------------------------------------------------------------
+  # A safe, self-controlled, reversible site for action_executor.py to
+  # act on -- both for the hackathon demo itself and for validating the
+  # real vision model's decisions (see demo_target/app.py's docstring and
+  # scripts/live_test_action_loop.py). Never a real third-party site:
+  # this is the "safe/reversible default demo target" safety rail named
+  # in README's Ambient RPA section, applied to testing too, not just
+  # the live demo.
+  demo_target:
+    build: ./demo_target
+    ports:
+      - "5050:5050"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5050/health')\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   # --- Ambient RPA memory (feature/ambient-rpa-action-bridge only) --------
   # Cross-process lock backend for qdrant_store.record_workflow_outcome's
   # read-merge-write -- see that function and _distributed_lock_for_workflow

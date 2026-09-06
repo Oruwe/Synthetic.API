@@ -316,6 +316,50 @@ DAG finishes (`executor.py`'s `_compose_action_answer`) — there's no LLM
 drafting step for a deterministic step sequence, so this path never
 depends on (or waits for) the Synthesizer's async poll loop at all.
 
+### `demo_target/`: a safe, self-controlled site to act on
+
+General open-web browser automation means this feature could in principle
+be pointed at any real site the planner's search turns up — but a live
+demo or a test run has no business taking that risk. `demo_target/` is a
+tiny, self-hosted Flask fixture (same convention as `mock_portal/`, one
+new `docker-compose.yml` service) with two flows on one page:
+
+- **A newsletter signup** (email + Subscribe) — the "should complete"
+  case, with in-memory-only state cleared by `POST /reset` so every demo
+  or test run starts clean. Nothing here is ever persisted, sent, or
+  real.
+- **A "Complete Purchase — $49/mo" button** — deliberately payment-shaped
+  so it exercises both lines of defense live: the vision model's own
+  self-refusal instruction, and `action_executor.py`'s independent regex
+  backstop, which must block the click before it ever reaches this page
+  (there's intentionally nothing behind the button — refusing to click it
+  IS the test).
+
+This is the intended target for both the actual hackathon demo and for
+validating the vision model's real judgment — which could not be verified
+inside the sandbox this feature was built in (its network policy blocks
+`openrouter.ai` outright, confirmed via a direct connectivity check, not
+assumed — every other layer of this system, DAG executor through the
+Redis lock, WAS verified live from there; this was the one piece that
+genuinely couldn't be). `scripts/live_test_action_loop.py` runs the real
+loop — real vision call, real Chromium, real clicks — against
+`demo_target`, wherever `OPENROUTER_API_KEY` is actually reachable:
+
+```bash
+docker compose up -d demo_target   # or: python demo_target/app.py
+uv run python scripts/live_test_action_loop.py
+uv run python scripts/live_test_action_loop.py --intent "unlock Northwind Weekly Pro"  # exercises the payment guard
+```
+
+`demo_target/` has no pytest coverage, deliberately matching
+`mock_portal/`'s own precedent — both are live fixtures meant to be run,
+not unit-tested. Its actual mechanics (Playwright launch, screenshot,
+coordinate mapping, click/type, the payment guard) were verified for real
+against this exact fixture, with the vision-model call stubbed to a
+scripted decision sequence (mirroring how the real vision loop's own unit
+tests mock it) — confirmed genuine, not by construction, by checking the
+resulting screenshot for the actual typed text and confirmation banner.
+
 ## What's dormant (kept, not deleted, not live)
 
 - **Shipping portal** — `mock_portal/`, `agents/web_navigator/portal_client.py` +
@@ -377,6 +421,13 @@ agents/synthesizer/
 ui/
   app.py                   Gradio demo UI -- calls the Orchestrator's HTTP API only,
                           see "Voice & UI" below
+demo_target/               (feature/ambient-rpa-action-bridge branch) safe, self-hosted
+                          Flask fixture for the action path to act on -- see that
+                          section above
+scripts/
+  live_test_action_loop.py (feature/ambient-rpa-action-bridge branch) runs the REAL
+                          vision loop against demo_target, wherever OPENROUTER_API_KEY
+                          is actually reachable
 ```
 
 ## Running it

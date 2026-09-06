@@ -1,0 +1,89 @@
+body {
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: #f4f5f7;
+  margin: 0;
+  padding: 48px 24px;
+  display: flex;
+  justify-content: center;
+}
+
+.card {
+  background: #ffffff;
+  border: 1px solid #e2e4e9;
+  border-radius: 12px;
+  padding: 32px 40px;
+  max-width: 560px;
+  width: 100%;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+h1 {
+  margin: 0 0 4px;
+  font-size: 26px;
+}
+
+.subtitle {
+  color: #6b7280;
+  font-size: 14px;
+  margin: 0 0 24px;
+}
+
+.block h2 {
+  font-size: 18px;
+  margin-bottom: 8px;
+}
+
+input[type="text"] {
+  width: 260px;
+  height: 36px;
+  font-size: 15px;
+  padding: 0 10px;
+  border: 1px solid #cbd2d9;
+  border-radius: 6px;
+  margin-right: 8px;
+}
+
+button {
+  height: 38px;
+  padding: 0 18px;
+  font-size: 15px;
+  border: 1px solid #cbd2d9;
+  border-radius: 6px;
+  background: #f0f1f3;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #e6e8eb;
+}
+
+button.danger {
+  background: #fff1f0;
+  border-color: #ffb3ae;
+  color: #a8071a;
+}
+
+button.danger:hover {
+  background: #ffe1de;
+}
+
+.confirmation {
+  color: #1a7f37;
+  font-weight: 600;
+}
+
+.count {
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.note {
+  color: #a8071a;
+  font-size: 13px;
+}
+
+hr {
+  border: none;
+  border-top: 1px solid #e2e4e9;
+  margin: 28px 0;
+}
