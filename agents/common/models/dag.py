@@ -11,6 +11,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from agents.common.models.page import Source
+
 
 class NodeType(str, Enum):
     SCRAPE_PORTAL = "scrape_portal"
@@ -99,7 +101,22 @@ class RunState(BaseModel):
     # existed, the ONLY place the answer appeared was the agents-synthesizer
     # container's stdout/logs (see agents/common/notifier.py), which isn't
     # something an API caller can poll for.
+    #
+    # `answer` is the full text INCLUDING the "Sources used: ..." /
+    # "Partial results: ..." footer -- kept exactly as before for backward
+    # compatibility (notifier.notify() and any existing consumer still see
+    # the same string). The fields below are additive, not a replacement:
+    # `answer_text` is the same answer with that footer stripped (what a
+    # UI's "read aloud" or a clean answer display should use -- reading
+    # "Sources used: https://..." out loud verbatim was a real, silly bug
+    # in the first version of ui/app.py), and `sources` is the same
+    # citation list structured as {url, title, snippet, score} instead of
+    # a comma-joined string a UI would have to re-parse.
     answer: str | None = None
+    answer_text: str | None = None
+    sources: list[Source] = Field(default_factory=list)
+    sources_attempted: int | None = None
+    sources_succeeded: int | None = None
 
 
 class PlanValidationError(Exception):

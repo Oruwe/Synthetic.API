@@ -8,11 +8,13 @@ LLM call — belt-and-suspenders on top of the delimiting/instruction.
 """
 
 import json
+from dataclasses import dataclass, field
 
 from qdrant_client.http import models as qm
 
 from agents.common.lyzr_wrapper import LyzrAgentWrapper
 from agents.common.logging import get_logger
+from agents.common.models.page import Source
 
 logger = get_logger(component="drafter")
 
@@ -143,13 +145,63 @@ def _chunk_to_prompt_dict(point: qm.ScoredPoint) -> dict:
     }
 
 
+def _build_sources(chunks: list[qm.ScoredPoint]) -> list[Source]:
+    """Structured, deduplicated citation list built from the same
+    retrieved chunks the answer is drafted from -- title, a short
+    snippet, and the retrieval relevance score, not just a bare URL
+    string (see the "Sources used: ..." footer this complements, not
+    replaces -- kept for backward compatibility). Chunks arrive already
+    ranked by Qdrant, so the first occurrence of a URL is its
+    highest-scoring chunk; later duplicates for the same URL are skipped
+    rather than overwriting it.
+    """
+    seen: set[str] = set()
+    sources: list[Source] = []
+    for point in chunks:
+        payload = point.payload or {}
+        url = payload.get("url")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        snippet = (payload.get("text") or "")[:200].strip()
+        sources.append(
+            Source(
+                url=url,
+                title=payload.get("title") or url,
+                snippet=snippet or None,
+                score=getattr(point, "score", None),
+            )
+        )
+    return sources
+
+
+@dataclass
+class DraftedAnswer:
+    """What draft_answer() actually produced -- not just one flattened
+    string. `full` is exactly what the old draft_answer() used to return
+    (answer + the "Sources used"/"Partial results" footer), kept for
+    backward compatibility with notify()/RunState.answer. `text` is the
+    same answer with that footer stripped -- what a UI's "read aloud" or
+    a clean answer display should use (reading "Sources used:
+    https://..." out loud verbatim was a real bug in the first version of
+    ui/app.py). `sources` is the same citations as structured data
+    instead of a comma-joined string a caller would have to re-parse.
+    """
+
+    text: str
+    full: str
+    sources: list[Source] = field(default_factory=list)
+    sources_attempted: int = 0
+    sources_succeeded: int = 0
+
+
 def draft_answer(
     chunks: list[qm.ScoredPoint],
     run_id: str,
     question: str,
     sources_attempted: int = 0,
     sources_succeeded: int = 0,
-) -> str:
+) -> DraftedAnswer:
     """Drafts an answer from semantically-retrieved chunks (see
     qdrant_store.semantic_search_pages). Always states which sources were
     actually used, and always states when the answer is based on a partial
@@ -158,14 +210,22 @@ def draft_answer(
     model ignores the prompt or the fallback template is used instead.
     """
     if not chunks:
-        return (
+        text = (
             f'I couldn\'t find any usable web content to answer: "{question}". '
             f"{sources_succeeded}/{sources_attempted} candidate source(s) were fetched "
             "successfully -- try rephrasing the question, or check that TAVILY_API_KEY "
             "is configured."
         )
+        return DraftedAnswer(
+            text=text,
+            full=text,
+            sources=[],
+            sources_attempted=sources_attempted,
+            sources_succeeded=sources_succeeded,
+        )
 
     chunk_data = [_chunk_to_prompt_dict(c) for c in chunks]
+    sources = _build_sources(chunks)
     user_input = (
         f"Research question: {question}\n\n"
         f"<DATA>\n{json.dumps(chunk_data, indent=2)}\n</DATA>\n\n"
@@ -178,11 +238,17 @@ def draft_answer(
         logger.warning("draft_answer_llm_failed_using_template", error=str(exc), run_id=run_id)
         answer = _page_template_fallback(question, chunk_data)
 
-    used_urls = sorted({c["url"] for c in chunk_data if c.get("url")})
+    used_urls = sorted({s.url for s in sources})
     footer = f"\n\nSources used: {', '.join(used_urls)}"
     if sources_attempted and sources_succeeded < sources_attempted:
         footer += f"\n(Partial results: {sources_succeeded}/{sources_attempted} candidate sources were retrievable.)"
-    return answer + footer
+    return DraftedAnswer(
+        text=answer,
+        full=answer + footer,
+        sources=sources,
+        sources_attempted=sources_attempted,
+        sources_succeeded=sources_succeeded,
+    )
 
 
 def _page_template_fallback(question: str, chunk_data: list[dict]) -> str:

@@ -23,25 +23,33 @@ def _handle_completed_runs(runs: list[RunState]) -> None:
         chunks = qdrant_store.semantic_search_pages(run.run_id, question)
         sources_succeeded = len({c.payload.get("url") for c in chunks if c.payload and c.payload.get("url")})
 
-        answer = drafter.draft_answer(
+        drafted = drafter.draft_answer(
             chunks,
             run.run_id,
             question,
             sources_attempted=sources_attempted,
             sources_succeeded=sources_succeeded,
         )
-        notifier.notify(answer, run.run_id)
+        notifier.notify(drafted.full, run.run_id)
 
         # Persist the answer onto the run itself so GET /runs/{run_id} can
         # hand it back directly -- previously the only place it appeared
         # was this process's stdout/logs (see notifier.notify above).
+        # `answer` stays the full backward-compatible string; `answer_text`/
+        # `sources`/etc are additive structured fields for a UI to use
+        # instead of re-parsing the "Sources used: ..." footer (see
+        # drafter.DraftedAnswer and RunState's field comments).
         # Best-effort: a save failure here must not re-raise and abort the
         # notification that already succeeded above, and re-reading the
         # run guards against overwriting a newer save from a concurrent
         # writer (there isn't one today, but load-before-save costs nothing).
         try:
             fresh = run_store.load_run(run.run_id) or run
-            fresh.answer = answer
+            fresh.answer = drafted.full
+            fresh.answer_text = drafted.text
+            fresh.sources = drafted.sources
+            fresh.sources_attempted = drafted.sources_attempted
+            fresh.sources_succeeded = drafted.sources_succeeded
             run_store.save_run(fresh)
         except Exception as exc:  # noqa: BLE001 - the answer is already delivered via notify()
             logger.warning("answer_persist_failed", run_id=run.run_id, error=str(exc))

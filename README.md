@@ -281,8 +281,12 @@ Then:
   readiness (Qdrant reachable, which API keys are actually configured).
 - `curl -s http://localhost:8000/runs/<run_id> | python3 -m json.tool` — live
   DAG run state (same content as `data/runs/<run_id>.json`); once the
-  Synthesizer finishes, the response's `"answer"` field IS the drafted,
-  cited answer — this is the one place to fetch it back over the API.
+  Synthesizer finishes: `"answer"` is the full drafted, cited text
+  (unchanged, backward-compatible); `"answer_text"` is the same with the
+  "Sources used"/"Partial results" footer stripped (for display/read-aloud);
+  `"sources"` is the same citations as structured
+  `[{url, title, snippet, score}]` instead of a string to re-parse; and
+  `"sources_attempted"`/`"sources_succeeded"` are the plain counts.
 - `http://localhost:6333/dashboard` — Qdrant collection `web_pages`.
 - `http://localhost:3000` — Langfuse trace UI (call-level latency/tokens/cost
   for the drafting LLM call only — not where the answer itself is meant to

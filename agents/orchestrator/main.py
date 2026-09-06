@@ -3,8 +3,11 @@
 Entry points into the whole system:
   POST /webhook/omi   - real Omi voice-transcript webhook
   POST /trigger        - manual trigger for local dev/demo (same payload shape as a parsed Omi transcript)
-  GET  /runs/{run_id}  - inspect a run's live state, incl. `answer` once the Synthesizer
-                         finishes drafting it (also readable at data/runs/<run_id>.json)
+  GET  /runs/{run_id}  - inspect a run's live state; once the Synthesizer finishes drafting,
+                         `answer` (full text incl. footer, backward-compatible), `answer_text`
+                         (no footer -- for display/read-aloud), `sources` (structured
+                         [{url,title,snippet,score}]), and `sources_attempted`/`sources_succeeded`
+                         are all populated (also readable at data/runs/<run_id>.json)
 """
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException

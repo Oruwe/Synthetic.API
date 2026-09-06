@@ -35,28 +35,47 @@ _POLL_INTERVAL_SECONDS = 3.0
 _MAX_WAIT_SECONDS = 300
 
 
+def _format_sources_markdown(sources: list[dict], sources_attempted, sources_succeeded) -> str:
+    """Renders the structured `sources` list (url/title/snippet/score) as
+    clickable markdown links instead of the old flattened "Sources used:
+    url1, url2" string -- see RunState's field comments (dag.py) for why
+    both still exist side by side."""
+    lines = []
+    if sources:
+        lines.append("**Sources:**")
+        for s in sources:
+            title = s.get("title") or s.get("url")
+            url = s.get("url")
+            score = s.get("score")
+            score_str = f" _(relevance {score:.2f})_" if isinstance(score, (int, float)) else ""
+            lines.append(f"- [{title}]({url}){score_str}")
+    if sources_attempted and sources_succeeded is not None and sources_succeeded < sources_attempted:
+        lines.append(f"\n_Partial results: {sources_succeeded}/{sources_attempted} candidate sources were retrievable._")
+    return "\n".join(lines)
+
+
 def ask(question: str):
     question = (question or "").strip()
     if not question:
-        yield "Type a question first.", ""
+        yield "Type a question first.", "", ""
         return
 
-    yield "🔎 Sending your question to the Orchestrator...", ""
+    yield "🔎 Sending your question to the Orchestrator...", "", ""
 
     try:
         resp = requests.post(f"{ORCHESTRATOR_URL}/trigger", json={"transcript": question}, timeout=10)
         resp.raise_for_status()
     except Exception as exc:  # noqa: BLE001 - show the real error, don't crash the UI
-        yield f"⚠️ Could not reach the Orchestrator at {ORCHESTRATOR_URL}: {exc}", ""
+        yield f"⚠️ Could not reach the Orchestrator at {ORCHESTRATOR_URL}: {exc}", "", ""
         return
 
     body = resp.json()
     run_id = body.get("run_id")
     if not run_id:
-        yield f"⚠️ Unexpected response from Orchestrator: {body}", ""
+        yield f"⚠️ Unexpected response from Orchestrator: {body}", "", ""
         return
 
-    yield f"🛰️ Run `{run_id}` started — searching the web, fetching pages, and embedding...", ""
+    yield f"🛰️ Run `{run_id}` started — searching the web, fetching pages, and embedding...", "", ""
 
     waited = 0.0
     while waited < _MAX_WAIT_SECONDS:
@@ -66,24 +85,31 @@ def ask(question: str):
             run_resp = requests.get(f"{ORCHESTRATOR_URL}/runs/{run_id}", timeout=10)
             run_resp.raise_for_status()
         except Exception as exc:  # noqa: BLE001
-            yield f"⚠️ Lost contact polling the run: {exc}", ""
+            yield f"⚠️ Lost contact polling the run: {exc}", "", ""
             return
 
         run = run_resp.json()
         status = run.get("overall_status")
         if status in ("completed", "failed", "circuit_broken", "no_capability"):
-            answer = run.get("answer")
-            if answer:
-                yield f"✅ Done (`{status}`, {waited:.0f}s elapsed).", answer
+            # answer_text (no footer) is what should be displayed/read aloud;
+            # fall back to the older flattened `answer` field for runs
+            # persisted before this field existed.
+            answer_text = run.get("answer_text") or run.get("answer")
+            if answer_text:
+                sources_md = _format_sources_markdown(
+                    run.get("sources") or [], run.get("sources_attempted"), run.get("sources_succeeded")
+                )
+                yield f"✅ Done (`{status}`, {waited:.0f}s elapsed).", answer_text, sources_md
             else:
-                yield f"⚠️ Run finished with status `{status}` but no answer was recorded.", ""
+                yield f"⚠️ Run finished with status `{status}` but no answer was recorded.", "", ""
             return
 
-        yield f"⏳ Still working... (`{status}`, {waited:.0f}s elapsed)", ""
+        yield f"⏳ Still working... (`{status}`, {waited:.0f}s elapsed)", "", ""
 
     yield (
         f"⚠️ Timed out after {_MAX_WAIT_SECONDS}s waiting for run `{run_id}` — "
         f"check `docker compose logs` or poll `/runs/{run_id}` directly.",
+        "",
         "",
     )
 
@@ -111,11 +137,14 @@ with gr.Blocks(title="Synthetic.API") as demo:
     )
     ask_button = gr.Button("Ask", variant="primary")
     status_box = gr.Markdown()
-    answer_box = gr.Textbox(label="Answer", lines=10, interactive=False)
+    # Only the clean answer text lives here now -- no "Sources used: ..."
+    # footer mixed in, so "Read answer aloud" below doesn't recite URLs.
+    answer_box = gr.Textbox(label="Answer", lines=8, interactive=False)
+    sources_box = gr.Markdown()
     read_aloud_button = gr.Button("🔊 Read answer aloud")
 
-    ask_button.click(ask, inputs=question_box, outputs=[status_box, answer_box])
-    question_box.submit(ask, inputs=question_box, outputs=[status_box, answer_box])
+    ask_button.click(ask, inputs=question_box, outputs=[status_box, answer_box, sources_box])
+    question_box.submit(ask, inputs=question_box, outputs=[status_box, answer_box, sources_box])
     read_aloud_button.click(None, inputs=answer_box, outputs=None, js=_READ_ALOUD_JS)
 
 if __name__ == "__main__":
