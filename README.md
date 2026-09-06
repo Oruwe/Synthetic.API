@@ -189,6 +189,68 @@ reasoned about:
   call per page — plus a 180s node timeout as a safety margin on top of
   that fix, not a substitute for it.
 
+## Ambient RPA action path (experimental — `feature/ambient-rpa-action-bridge` branch only)
+
+The research path above answers questions. This path *does things*: a
+task-shaped transcript ("book a table for two tonight", "sign me up for
+the newsletter") is no longer a memory lookup — it's a synthetic API
+gateway for web portals that never had a real one, physically clicking and
+typing through whatever page the intent points at.
+
+```
+transcript → intent classifier (planner.py)
+    ├── question → fetch_pages → embed_pages (unchanged, above)
+    └── action   → execute_action (action_handlers.py)
+                       ├── Qdrant has a similar past SUCCESSFUL workflow?
+                       │      → replay its recorded steps (no vision calls)
+                       └── else → observe (screenshot) → decide (vision
+                                  model) → act (Playwright) → repeat,
+                                  recorded back into Qdrant either way
+```
+
+Deliberately kept off `main` on its own branch (`feature/ambient-rpa-
+action-bridge`) so it can be discarded cleanly if it doesn't pan out —
+this is the riskiest, least-proven part of the system: general open-web
+browser automation is an unsolved hard problem, not a solved one being
+lightly applied here.
+
+**Non-negotiable safety rails, enforced in code, not just prompted for:**
+
+- **A hard step ceiling** (`ACTION_MAX_STEPS`, default 8) — a confused
+  model or a page that never reaches a recognizable "done" state cannot
+  loop forever, the same discipline as every timeout/circuit-breaker
+  elsewhere in this repo.
+- **A payment/checkout guard independent of the model's own instructions**
+  (`_looks_like_payment_action` in `action_executor.py`) — a regex
+  backstop checked against the model's own stated reasoning and any typed
+  text *before* a click/type is ever executed, so a bypassed or ignored
+  system prompt still can't submit a payment. The vision model is also
+  separately instructed to self-refuse anything payment-shaped and
+  explain why (`kind: "refused"`) — this is the second, independent line
+  of defense, not the only one.
+- **Full audit trail.** Every step's screenshot is saved
+  (`SCREENSHOT_DIR/<run_id>/action/`), and every attempt — successful,
+  refused, or stuck — is recorded as an `ActionWorkflow` in Qdrant's
+  `action_workflows` collection, so what the system actually did to a real
+  page is always inspectable after the fact, never just described.
+- **A safe, deterministic replay path stays conservative.** A prior
+  workflow only gets replayed outright above `ACTION_WORKFLOW_REPLAY_MIN_SCORE`
+  (default 0.85 cosine similarity, deliberately higher-bar than the
+  research path's top-k retrieval) — a wrong match here means executing
+  real clicks on the strength of a bad vector match, not just citing a
+  slightly-off source. Any failure partway through a replay (the page
+  changed) falls back to a fresh live loop rather than leaving a page
+  half-acted-on.
+- **Retrying is never safe here.** The `execute_action` DAG node is built
+  with `max_retries=1` — unlike an HTTP fetch, a click/type on a real page
+  is not idempotent; a node-level retry could resubmit an action the first
+  attempt already performed for real.
+
+Reports its outcome directly onto `RunState.answer`/`answer_text` once the
+DAG finishes (`executor.py`'s `_compose_action_answer`) — there's no LLM
+drafting step for a deterministic step sequence, so this path never
+depends on (or waits for) the Synthesizer's async poll loop at all.
+
 ## What's dormant (kept, not deleted, not live)
 
 - **Shipping portal** — `mock_portal/`, `agents/web_navigator/portal_client.py` +
@@ -236,8 +298,11 @@ agents/web_navigator/
   rate_limiter.py           per-domain courtesy throttle
   page_handlers.py        registers fetch_pages / embed_pages DAG node handlers
 agents/orchestrator/
-  planner.py              Tavily search -> 2-node DAGPlan (fetch_pages -> embed_pages)
-  executor.py              DAG engine (unchanged)
+  planner.py              Tavily search -> 2-node DAGPlan (fetch_pages -> embed_pages),
+                          or (feature/ambient-rpa-action-bridge branch) a single
+                          execute_action node for a task-shaped transcript
+  executor.py              DAG engine (unchanged for the research path; composes and
+                          reports the answer directly for an execute_action plan)
   main.py                  FastAPI: /health (liveness), /ready (readiness), /trigger,
                           /webhook/omi, /runs/{run_id} (unchanged contract)
 agents/synthesizer/
