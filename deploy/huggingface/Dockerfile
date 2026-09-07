@@ -72,7 +72,7 @@ RUN uv run python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/b
 # demo_target's own (separate, lightweight) Flask dependency -- folded
 # into this same venv since this is one container/process group, unlike
 # docker-compose's separate demo_target service+image.
-RUN uv run python -m pip install --no-cache-dir -r demo_target/requirements.txt
+RUN uv pip install -r demo_target/requirements.txt
 
 RUN chmod +x /app/deploy/common/start.sh
 
