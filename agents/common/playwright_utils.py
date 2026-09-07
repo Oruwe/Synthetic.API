@@ -36,7 +36,22 @@ def launched_browser(timeout_ms: int = PAGE_DEFAULT_TIMEOUT_MS):
     page-level operations on an already-running browser).
     """
     with sync_playwright() as p:
-        launch_kwargs = {"headless": True, "timeout": timeout_ms}
+        launch_kwargs = {
+            "headless": True,
+            "timeout": timeout_ms,
+            # Docker's default /dev/shm is 64MB regardless of the
+            # container's own memory limit -- a classic Chromium-in-
+            # container crash cause (SIGBUS/renderer crashes on
+            # anything past a trivial page) that this codebase's own
+            # docker-compose.yml doesn't work around via shm_size
+            # either. This flag makes Chromium use /tmp instead of
+            # /dev/shm for shared memory -- slightly slower, much more
+            # reliable under a container's real memory constraints
+            # (most acute on a free-tier host like Render's 512MB, but
+            # a real risk on every deployment, not something specific
+            # to any one of them). Harmless outside a container too.
+            "args": ["--disable-dev-shm-usage"],
+        }
         if CHROMIUM_EXECUTABLE_OVERRIDE:
             launch_kwargs["executable_path"] = CHROMIUM_EXECUTABLE_OVERRIDE
         browser: Browser = p.chromium.launch(**launch_kwargs)

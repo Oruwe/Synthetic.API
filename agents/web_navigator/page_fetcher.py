@@ -33,26 +33,24 @@ one.
 """
 
 import io
-import os
 import re
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 import httpx
 import trafilatura
-from playwright.sync_api import sync_playwright
 from pypdf import PdfReader
 
 from agents.common.config import settings
 from agents.common.logging import get_logger
 from agents.common.models.page import FetchedPage
 from agents.common.models.research import SearchResult
+from agents.common.playwright_utils import launched_browser
 from agents.web_navigator import rate_limiter, robots
 
 logger = get_logger(component="page_fetcher")
 
-_CHROMIUM_EXECUTABLE_OVERRIDE = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE")
 # Minimum word count below which the fast path is treated as having failed
 # (likely a JS-rendered page whose real content trafilatura can't see in
 # the raw HTML, or a boilerplate/nav-only page) and the Playwright
@@ -132,7 +130,7 @@ def _fetch_one(result: SearchResult, timeout_seconds: float) -> FetchedPage:
             url=result.url,
             title=result.title,
             text="",
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             fetch_method="http",
             error="disallowed by robots.txt",
         )
@@ -149,7 +147,7 @@ def _fetch_one(result: SearchResult, timeout_seconds: float) -> FetchedPage:
                 url=result.url,
                 title=result.title,
                 text="",
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
                 fetch_method="pdf",
                 error=str(exc),
             )
@@ -169,7 +167,7 @@ def _fetch_one(result: SearchResult, timeout_seconds: float) -> FetchedPage:
             url=result.url,
             title=result.title,
             text="",
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             fetch_method="http",
             error=str(exc),
         )
@@ -209,7 +207,7 @@ def _fetch_fast(result: SearchResult, timeout_seconds: float) -> FetchedPage | N
                 url=result.url,
                 title=result.title,
                 text="",
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
                 fetch_method="http",
                 gated=True,
                 gate_reason=gate_reason,
@@ -221,7 +219,7 @@ def _fetch_fast(result: SearchResult, timeout_seconds: float) -> FetchedPage | N
         url=result.url,
         title=title,
         text=text,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         fetch_method="http",
     )
 
@@ -257,7 +255,7 @@ def _extract_pdf_page(result: SearchResult, pdf_bytes: bytes) -> FetchedPage:
             url=result.url,
             title=result.title,
             text="",
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             fetch_method="pdf",
             error=f"pdf extraction failed: {exc}",
         )
@@ -267,7 +265,7 @@ def _extract_pdf_page(result: SearchResult, pdf_bytes: bytes) -> FetchedPage:
             url=result.url,
             title=result.title,
             text="",
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             fetch_method="pdf",
             error="pdf produced too little extractable text (likely scanned/image-only -- no OCR)",
         )
@@ -276,7 +274,7 @@ def _extract_pdf_page(result: SearchResult, pdf_bytes: bytes) -> FetchedPage:
         url=result.url,
         title=result.title,
         text=text,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         fetch_method="pdf",
     )
 
@@ -285,34 +283,32 @@ def _fetch_with_playwright(result: SearchResult, timeout_seconds: float) -> Fetc
     rate_limiter.throttle(result.url)
 
     timeout_ms = int(timeout_seconds * 1000)
-    with sync_playwright() as p:
-        # `timeout=` here bounds the browser LAUNCH itself (process spawn),
-        # which page.set_default_timeout() below does not cover -- that
-        # only applies to page-level operations (goto/click/etc.) on an
-        # already-running browser. A hung launch was a real gap: it's the
-        # one Playwright operation with no timeout anywhere else in this
-        # function, and thus the one that could genuinely defeat the DAG
-        # node's own outer timeout.
-        launch_kwargs = {"headless": True, "timeout": timeout_ms}
-        if _CHROMIUM_EXECUTABLE_OVERRIDE:
-            launch_kwargs["executable_path"] = _CHROMIUM_EXECUTABLE_OVERRIDE
-        browser = p.chromium.launch(**launch_kwargs)
-        try:
-            page = browser.new_page()
-            page.set_default_timeout(timeout_ms)
-            response = page.goto(result.url, wait_until="load")
-            # page.goto() does NOT raise on an HTTP error status -- a 404
-            # or 500 still "loads" as far as Playwright is concerned, so
-            # without this check an error page's own HTML (its "not
-            # found"/"internal server error" body) gets extracted and
-            # returned as if it were real content. Caught live: a test
-            # against a real 404 endpoint came back looking like a
-            # successful fetch until this check was added.
-            if response is not None and response.status >= 400:
-                raise RuntimeError(f"HTTP {response.status}")
-            html = page.content()
-        finally:
-            browser.close()
+    # launched_browser (agents/common/playwright_utils.py) bounds the
+    # browser LAUNCH itself (process spawn) -- page.set_default_timeout()
+    # below does not cover that, only page-level operations (goto/click/
+    # etc.) on an already-running browser. A hung launch was a real gap:
+    # it's the one Playwright operation with no timeout anywhere else in
+    # this function, and thus the one that could genuinely defeat the DAG
+    # node's own outer timeout. Also the single place --disable-dev-shm-
+    # usage is set, needed under any container's constrained /dev/shm --
+    # this function used to launch Chromium independently, without it (a
+    # real, previously-unfixed gap: see playwright_utils.py's own comment
+    # on why this matters, and this project's own docker-compose.yml,
+    # which still doesn't set shm_size either).
+    with launched_browser(timeout_ms=timeout_ms) as browser:
+        page = browser.new_page()
+        page.set_default_timeout(timeout_ms)
+        response = page.goto(result.url, wait_until="load")
+        # page.goto() does NOT raise on an HTTP error status -- a 404
+        # or 500 still "loads" as far as Playwright is concerned, so
+        # without this check an error page's own HTML (its "not
+        # found"/"internal server error" body) gets extracted and
+        # returned as if it were real content. Caught live: a test
+        # against a real 404 endpoint came back looking like a
+        # successful fetch until this check was added.
+        if response is not None and response.status >= 400:
+            raise RuntimeError(f"HTTP {response.status}")
+        html = page.content()
 
     document = trafilatura.bare_extraction(html, with_metadata=True)
     text = (document.text if document and document.text else "").strip()
@@ -324,7 +320,7 @@ def _fetch_with_playwright(result: SearchResult, timeout_seconds: float) -> Fetc
                 url=result.url,
                 title=title,
                 text="",
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
                 fetch_method="playwright",
                 gated=True,
                 gate_reason=gate_reason,
@@ -333,7 +329,7 @@ def _fetch_with_playwright(result: SearchResult, timeout_seconds: float) -> Fetc
         url=result.url,
         title=title,
         text=text,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         fetch_method="playwright",
         error=None if text else "playwright fallback produced no extractable text",
     )

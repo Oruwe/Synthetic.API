@@ -4,13 +4,15 @@ trafilatura, robots, and the rate limiter are all mocked -- no real
 network or browser needed, consistent with the rest of the offline suite.
 """
 
+from contextlib import contextmanager
+from datetime import UTC
 from types import SimpleNamespace
 
 import httpx
 import pytest
 
-import agents.web_navigator.page_fetcher as page_fetcher
 from agents.common.models.research import SearchResult
+from agents.web_navigator import page_fetcher
 
 
 def _result(url="https://example.test", title="Example"):
@@ -153,13 +155,13 @@ def test_fetch_one_falls_back_to_playwright_when_fast_path_fails(monkeypatch):
 
     def fake_playwright_fetch(result, timeout):
         called["url"] = result.url
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from agents.common.models.page import FetchedPage
 
         return FetchedPage(
             url=result.url, title=result.title, text="from playwright",
-            timestamp=datetime.now(timezone.utc), fetch_method="playwright",
+            timestamp=datetime.now(UTC), fetch_method="playwright",
         )
 
     monkeypatch.setattr(page_fetcher, "_fetch_with_playwright", fake_playwright_fetch)
@@ -213,21 +215,18 @@ def test_playwright_fallback_treats_http_error_status_as_a_failure(monkeypatch):
         def new_page(self):
             return _FakePage()
 
-        def close(self):
-            pass
+    @contextmanager
+    def fake_launched_browser(timeout_ms=None):
+        # _fetch_with_playwright now goes through the shared
+        # playwright_utils.launched_browser() (see agents/common/
+        # playwright_utils.py and tests/test_playwright_utils.py for its
+        # own launch-kwargs/close-on-exception coverage) instead of
+        # driving sync_playwright()/chromium.launch() itself -- this only
+        # needs to fake the yielded browser now, not the whole launch
+        # chain.
+        yield _FakeBrowser()
 
-    class _FakeChromium:
-        def launch(self, **kwargs):
-            return _FakeBrowser()
-
-    class _FakePlaywrightContext:
-        def __enter__(self):
-            return SimpleNamespace(chromium=_FakeChromium())
-
-        def __exit__(self, *a):
-            return False
-
-    monkeypatch.setattr(page_fetcher, "sync_playwright", lambda: _FakePlaywrightContext())
+    monkeypatch.setattr(page_fetcher, "launched_browser", fake_launched_browser)
 
     with pytest.raises(RuntimeError, match="404"):
         page_fetcher._fetch_with_playwright(_result(), timeout_seconds=9)
@@ -246,17 +245,17 @@ def test_fetch_one_isolates_a_playwright_http_error_status_without_raising(monke
 
 def test_fetch_pages_isolates_one_bad_url_from_the_rest(monkeypatch):
     def fake_fetch_one(result, timeout):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from agents.common.models.page import FetchedPage
 
         if "bad" in result.url:
             return FetchedPage(
-                url=result.url, title=result.title, text="", timestamp=datetime.now(timezone.utc),
+                url=result.url, title=result.title, text="", timestamp=datetime.now(UTC),
                 fetch_method="http", error="simulated failure",
             )
         return FetchedPage(
-            url=result.url, title=result.title, text="good content", timestamp=datetime.now(timezone.utc),
+            url=result.url, title=result.title, text="good content", timestamp=datetime.now(UTC),
             fetch_method="http",
         )
 

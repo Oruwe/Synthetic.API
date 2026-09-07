@@ -14,7 +14,6 @@ outbound network access to test the actual internet with.
 
 import os
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -54,7 +53,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body.encode())
 
-    def log_message(self, format, *args):  # noqa: A002 - silence default request logging in test output
+    def log_message(self, format, *args):
         pass
 
 
@@ -71,16 +70,21 @@ def local_server():
 
 @pytest.fixture(autouse=True)
 def _chromium_path(monkeypatch):
+    # page_fetcher's Playwright fallback now goes through the shared
+    # agents.common.playwright_utils.launched_browser() (see that module
+    # and test_playwright_utils.py) instead of driving sync_playwright()
+    # itself, so the executable-path override this fixture is a safety
+    # net for now lives there too.
     override = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE")
     if override:
-        import agents.web_navigator.page_fetcher as page_fetcher
+        from agents.common import playwright_utils
 
-        monkeypatch.setattr(page_fetcher, "_CHROMIUM_EXECUTABLE_OVERRIDE", override)
+        monkeypatch.setattr(playwright_utils, "CHROMIUM_EXECUTABLE_OVERRIDE", override)
 
 
 def test_fast_path_really_fetches_and_extracts_a_normal_page(local_server):
-    import agents.web_navigator.robots as robots
     from agents.common.models.research import SearchResult
+    from agents.web_navigator import robots
     from agents.web_navigator.page_fetcher import _fetch_fast
 
     robots._cache.clear()
@@ -95,9 +99,9 @@ def test_fast_path_really_fetches_and_extracts_a_normal_page(local_server):
 
 
 def test_fallback_path_really_renders_js_via_playwright(local_server):
-    import agents.web_navigator.robots as robots
     from agents.common.models.page import FetchedPage
     from agents.common.models.research import SearchResult
+    from agents.web_navigator import robots
     from agents.web_navigator.page_fetcher import _fetch_one
 
     robots._cache.clear()
@@ -112,8 +116,8 @@ def test_fallback_path_really_renders_js_via_playwright(local_server):
 
 
 def test_a_real_404_is_isolated_as_a_failed_fetch(local_server):
-    import agents.web_navigator.robots as robots
     from agents.common.models.research import SearchResult
+    from agents.web_navigator import robots
     from agents.web_navigator.page_fetcher import fetch_pages
 
     robots._cache.clear()
@@ -126,7 +130,7 @@ def test_a_real_404_is_isolated_as_a_failed_fetch(local_server):
 
 
 def test_real_robots_txt_is_fetched_and_respected(local_server):
-    import agents.web_navigator.robots as robots
+    from agents.web_navigator import robots
 
     robots._cache.clear()
 
@@ -135,8 +139,8 @@ def test_real_robots_txt_is_fetched_and_respected(local_server):
 
 
 def test_full_batch_against_a_real_server_mixed_outcomes(local_server):
-    import agents.web_navigator.robots as robots
     from agents.common.models.research import SearchResult
+    from agents.web_navigator import robots
     from agents.web_navigator.page_fetcher import fetch_pages
 
     robots._cache.clear()
