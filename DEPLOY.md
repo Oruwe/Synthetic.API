@@ -89,7 +89,8 @@ docker compose version   # confirms the compose plugin came with it
 ```bash
 git clone https://github.com/Oruwe/Synthetic.API.git
 cd Synthetic.API
-git checkout feature/ambient-rpa-action-bridge   # or main, once merged
+# main is up to date with everything built and verified this session --
+# a plain clone already checks it out, nothing extra needed.
 
 cp .env.example .env
 nano .env   # or vim/whatever's available
