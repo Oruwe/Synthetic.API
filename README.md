@@ -655,8 +655,21 @@ Then:
 
 `docker compose up` also starts a demo UI at `http://localhost:7860`
 (`ui/app.py`) — purely additive, it only calls the Orchestrator's existing
-`/trigger` and `/runs/{id}` HTTP API, so it carries zero risk to the
-pipeline itself.
+`/trigger`, `/runs/{id}`, and `/runs/{id}/resume` HTTP API, so it carries
+zero risk to the pipeline itself.
+
+Deliberately not Gradio's default theme or layout — a custom dark theme
+(`SyntheticTheme`, built on `gr.themes.Base`, the blank slate) plus
+hand-written CSS keyed entirely on `elem_id`/`elem_classes` this file
+assigns itself, never on Gradio's own internal implementation class
+names (which differ across Gradio versions) — so a future Gradio upgrade
+can't silently break the look. Verified against a real Gradio 5.50.0
+install (matching `ui/requirements.txt`'s `<6` pin) before shipping, not
+just written and hoped: the Blocks graph constructs, the app launches and
+serves real HTML containing this file's own branding/CSS over HTTP, and
+a real click through Gradio's own `gradio_client` — not a direct Python
+call — round-trips through `ask()` and lands the expected message in the
+expected output slot.
 
 Two deliberate, honest choices worth knowing about:
 

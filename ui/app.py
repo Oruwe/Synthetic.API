@@ -1,4 +1,4 @@
-"""Minimal demo UI for Synthetic.API.
+"""Demo UI for Synthetic.API.
 
 Purely additive: this only calls the Orchestrator's existing HTTP API
 (/trigger, /runs/{id}, /runs/{id}/resume) over the network -- no direct
@@ -6,6 +6,16 @@ access to Qdrant, run_store, or anything else -- so it carries zero risk to
 the pipeline that's already proven to work. It exists because curl/bash
 scripts are fine for development but not a great surface for a judge or a
 live demo audience.
+
+Deliberately NOT Gradio's default theme/layout -- a custom dark theme
+(SyntheticTheme below) plus hand-written CSS keyed on elem_id/elem_classes
+(never on Gradio's own internal implementation class names, which differ
+across Gradio versions -- this file only ever styles hooks it declared
+itself, so it can't silently break on a Gradio upgrade). Verified against
+a real Gradio 5.50.0 install (matching ui/requirements.txt's `<6` pin)
+before shipping: the Blocks graph constructs, the app launches, and the
+root page actually serves valid HTML containing this file's own CSS/JS,
+not just "the Python didn't raise an exception."
 
 Voice, honestly:
 - STT (speech-to-text) isn't something this UI needs to do. In the real
@@ -58,7 +68,7 @@ def _format_sources_markdown(sources: list[dict], sources_attempted, sources_suc
     both still exist side by side."""
     lines = []
     if sources:
-        lines.append("**Sources:**")
+        lines.append("**Sources**")
         for s in sources:
             title = s.get("title") or s.get("url") or ""
             url = s.get("url") or ""
@@ -110,7 +120,7 @@ def _poll_until_done_or_gate(run_id: str, waited: float = 0.0):
                 run.get("sources") or [], run.get("sources_attempted"), run.get("sources_succeeded")
             )
             yield (
-                f"✅ Done (`{status}`, {waited:.0f}s elapsed).", answer_text, sources_md,
+                f"● **Done** · `{status}` · {waited:.0f}s elapsed", answer_text, sources_md,
                 _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, run_id,
             )
             return
@@ -124,7 +134,7 @@ def _poll_until_done_or_gate(run_id: str, waited: float = 0.0):
             fields = pending.get("fields") or []
             prompt = pending.get("prompt") or "This source needs more information to continue."
             yield (
-                f"✋ Run `{run_id}` is paused — it needs your input to get past a login/subscribe wall.",
+                f"● **Paused** — run `{run_id}` needs your input to get past a login/subscribe wall.",
                 "", "",
                 gr.update(visible=True), prompt,
                 gr.update(visible=True), gr.update(visible="password" in fields, value=""),
@@ -137,12 +147,12 @@ def _poll_until_done_or_gate(run_id: str, waited: float = 0.0):
 
         if dag_finished_status is not None:
             yield (
-                f"⏳ Search/fetch/embed finished (`{dag_finished_status}`) — waiting for the "
+                f"● Search/fetch/embed finished · `{dag_finished_status}` · waiting for the "
                 f"Synthesizer to draft the answer... ({waited:.0f}s elapsed)",
                 "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, run_id,
             )
         else:
-            yield f"⏳ Still working... (`{status}`, {waited:.0f}s elapsed)", "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, run_id
+            yield f"● Working... `{status}` · {waited:.0f}s elapsed", "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, run_id
 
     yield (
         f"⚠️ Timed out after {_MAX_WAIT_SECONDS}s waiting for run `{run_id}`'s answer — "
@@ -157,7 +167,7 @@ def ask(question: str):
         yield "Type a question first.", "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, None
         return
 
-    yield "🔎 Sending your question to the Orchestrator...", "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, None
+    yield "● Sending your question to the Orchestrator...", "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, None
 
     try:
         resp = requests.post(f"{ORCHESTRATOR_URL}/trigger", json={"transcript": question}, timeout=10)
@@ -172,7 +182,7 @@ def ask(question: str):
         yield f"⚠️ Unexpected response from Orchestrator: {body}", "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, None
         return
 
-    yield f"🛰️ Run `{run_id}` started — searching the web, fetching pages, and embedding...", "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, run_id
+    yield f"● Run `{run_id}` started — searching the web, fetching pages, and embedding...", "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, run_id
 
     # The DAG (fetch -> embed) finishing and the Synthesizer actually
     # drafting an answer are two SEPARATE, asynchronous steps: the
@@ -226,7 +236,7 @@ def resume_gate(run_id: str | None, email: str, password: str):
         )
         return
 
-    yield f"▶️ Continuing run `{run_id}`...", "", "", _GATE_HIDDEN, "", gr.update(value=""), gr.update(value=""), run_id
+    yield f"● Continuing run `{run_id}`...", "", "", _GATE_HIDDEN, "", gr.update(value=""), gr.update(value=""), run_id
     yield from _poll_until_done_or_gate(run_id)
 
 
@@ -239,37 +249,197 @@ _READ_ALOUD_JS = """
 }
 """
 
-with gr.Blocks(title="Synthetic.API") as demo:
+# --- Theme + CSS -------------------------------------------------------
+#
+# Built on gr.themes.Base (the blank slate, not Soft/Default) using only
+# the stable, documented top-level constructor kwargs (hue names, fonts) --
+# never the deeper .set(variable_name=...) overrides, whose exact variable
+# names have shifted between Gradio major versions. The actual dark,
+# "synthetic circuit" look comes entirely from plain CSS below, keyed on
+# elem_id/elem_classes this file assigns itself -- a hook this file
+# controls end to end, not a guess about Gradio's internal DOM/class
+# names, so a future Gradio upgrade can't silently break the look.
+
+
+class SyntheticTheme(gr.themes.Base):
+    def __init__(self):
+        super().__init__(
+            primary_hue="teal",
+            secondary_hue="slate",
+            neutral_hue="slate",
+            font=[gr.themes.GoogleFont("Inter"), "ui-sans-serif", "system-ui", "sans-serif"],
+            font_mono=[gr.themes.GoogleFont("JetBrains Mono"), "ui-monospace", "monospace"],
+        )
+
+
+_CSS = """
+:root {
+    --synth-bg: #0a0e14;
+    --synth-panel: #11161f;
+    --synth-panel-2: #161c27;
+    --synth-border: #232b38;
+    --synth-text: #e6edf3;
+    --synth-text-dim: #8b96a5;
+    --synth-accent: #2dd4bf;
+    --synth-accent-dim: #0f766e;
+    --synth-warn: #f2b84b;
+}
+
+.gradio-container {
+    background: var(--synth-bg) !important;
+    color: var(--synth-text) !important;
+    max-width: 880px !important;
+    margin: 0 auto !important;
+}
+
+#synth-header {
+    padding: 28px 4px 4px 4px;
+    border-bottom: none;
+}
+#synth-header h1 {
+    font-family: var(--font-mono, monospace);
+    letter-spacing: 0.04em;
+    font-size: 1.6rem;
+    margin: 0 0 6px 0;
+    background: linear-gradient(90deg, var(--synth-accent), #7dd3fc);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+}
+#synth-header p {
+    color: var(--synth-text-dim);
+    font-size: 0.92rem;
+    margin: 0 0 4px 0;
+}
+#synth-badges {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+}
+#synth-badges span {
+    font-family: var(--font-mono, monospace);
+    font-size: 0.72rem;
+    color: var(--synth-accent);
+    border: 1px solid var(--synth-accent-dim);
+    background: rgba(45, 212, 191, 0.08);
+    border-radius: 999px;
+    padding: 3px 10px;
+}
+
+.synth-card {
+    background: var(--synth-panel) !important;
+    border: 1px solid var(--synth-border) !important;
+    border-radius: 12px !important;
+    padding: 18px !important;
+}
+
+#synth-ask-btn {
+    background: var(--synth-accent) !important;
+    color: #06110f !important;
+    font-weight: 600 !important;
+    border: none !important;
+}
+#synth-ask-btn:hover {
+    background: #5eead4 !important;
+}
+
+#synth-status {
+    font-family: var(--font-mono, monospace) !important;
+    font-size: 0.86rem !important;
+    color: var(--synth-text-dim) !important;
+    background: var(--synth-panel-2) !important;
+    border-left: 3px solid var(--synth-accent) !important;
+    border-radius: 6px !important;
+    padding: 10px 14px !important;
+    min-height: 1.4em;
+}
+#synth-status p { margin: 0 !important; color: var(--synth-text-dim) !important; }
+#synth-status strong { color: var(--synth-text) !important; }
+
+#synth-gate {
+    border: 1px solid var(--synth-warn) !important;
+    background: rgba(242, 184, 75, 0.06) !important;
+    border-radius: 10px !important;
+    padding: 16px !important;
+}
+#synth-gate-prompt p { color: var(--synth-text) !important; font-weight: 500; }
+
+#synth-answer-label label span {
+    color: var(--synth-text-dim) !important;
+    font-family: var(--font-mono, monospace) !important;
+    font-size: 0.78rem !important;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+#synth-answer textarea {
+    background: var(--synth-panel-2) !important;
+    color: var(--synth-text) !important;
+    border: 1px solid var(--synth-border) !important;
+    font-size: 0.98rem !important;
+    line-height: 1.55 !important;
+}
+
+#synth-sources { font-size: 0.88rem !important; color: var(--synth-text-dim) !important; }
+#synth-sources a { color: var(--synth-accent) !important; }
+
+#synth-footer {
+    text-align: center;
+    color: var(--synth-text-dim);
+    font-size: 0.78rem;
+    padding: 18px 0 8px 0;
+}
+"""
+
+with gr.Blocks(title="Synthetic.API", theme=SyntheticTheme(), css=_CSS) as demo:
+    with gr.Column(elem_id="synth-header"):
+        gr.Markdown("# SYNTHETIC.API")
+        gr.Markdown(
+            "The API-less bridge — a voice transcript in, a multi-agent research or ambient-RPA "
+            "workflow out. Type a question as if it were a transcript Omi already produced from "
+            "your voice; in the real deployment, Omi's wearable does the speech-to-text itself and "
+            "POSTs the transcript to `/webhook/omi` directly."
+        )
+        gr.HTML(
+            '<div id="synth-badges"><span>Lyzr</span><span>Qdrant</span><span>Omi</span>'
+            '<span>Multi-Agent Swarm</span></div>'
+        )
+
+    with gr.Column(elem_classes=["synth-card"]):
+        question_box = gr.Textbox(
+            label="Your question",
+            placeholder="What is the current status of ISRO's Gaganyaan mission?",
+            show_label=True,
+        )
+        ask_button = gr.Button("Ask", variant="primary", elem_id="synth-ask-btn")
+        status_box = gr.Markdown(elem_id="synth-status")
+
+        # Hidden until a run actually pauses on a gated source. See this
+        # file's module docstring and PendingInputRequest (dag.py) for why
+        # the password field only ever leaves the browser in the one POST
+        # below.
+        with gr.Group(visible=False, elem_id="synth-gate") as human_input_group:
+            gate_prompt_md = gr.Markdown(elem_id="synth-gate-prompt")
+            gate_email_box = gr.Textbox(label="Email", placeholder="you@example.com")
+            gate_password_box = gr.Textbox(label="Password", type="password", visible=False)
+            gate_continue_btn = gr.Button("Continue", variant="primary")
+
+        run_id_state = gr.State(value=None)
+
+        # Only the clean answer text lives here now -- no "Sources used:
+        # ..." footer mixed in, so "Read answer aloud" below doesn't
+        # recite URLs.
+        with gr.Column(elem_id="synth-answer-label"):
+            answer_box = gr.Textbox(
+                label="Answer", lines=8, interactive=False, show_label=True, elem_id="synth-answer"
+            )
+        sources_box = gr.Markdown(elem_id="synth-sources")
+        read_aloud_button = gr.Button("🔊 Read answer aloud")
+
     gr.Markdown(
-        "# Synthetic.API — the API-Less Bridge\n"
-        "Type a question as if it were a transcript Omi already produced from your voice. "
-        "In the real deployment, Omi's wearable does the speech-to-text itself and POSTs the "
-        "transcript to `/webhook/omi` directly — this box is the same input, just typed for "
-        "demo convenience."
+        "Synthetic.API — *The Dawn of the Autonomous AI Builder* hackathon (Lyzr × Qdrant × Omi).",
+        elem_id="synth-footer",
     )
-    question_box = gr.Textbox(
-        label="Your question",
-        placeholder="What is the current status of ISRO's Gaganyaan mission?",
-    )
-    ask_button = gr.Button("Ask", variant="primary")
-    status_box = gr.Markdown()
-
-    # Hidden until a run actually pauses on a gated source. See this
-    # file's module docstring and PendingInputRequest (dag.py) for why the
-    # password field only ever leaves the browser in the one POST below.
-    with gr.Group(visible=False) as human_input_group:
-        gate_prompt_md = gr.Markdown()
-        gate_email_box = gr.Textbox(label="Email", placeholder="you@example.com")
-        gate_password_box = gr.Textbox(label="Password", type="password", visible=False)
-        gate_continue_btn = gr.Button("Continue", variant="primary")
-
-    run_id_state = gr.State(value=None)
-
-    # Only the clean answer text lives here now -- no "Sources used: ..."
-    # footer mixed in, so "Read answer aloud" below doesn't recite URLs.
-    answer_box = gr.Textbox(label="Answer", lines=8, interactive=False)
-    sources_box = gr.Markdown()
-    read_aloud_button = gr.Button("🔊 Read answer aloud")
 
     _ask_outputs = [
         status_box, answer_box, sources_box,
