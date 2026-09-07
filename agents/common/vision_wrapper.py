@@ -184,14 +184,25 @@ def decide_next_action(
         parsed = _parse_json_response(raw)
         kind = parsed.get("kind")
         if kind not in _VALID_ACTION_KINDS:
-            logger.warning("vision_decide_action_unrecognized_kind", kind=kind)
+            # Logging just `kind` was useless for diagnosing WHY a response
+            # didn't parse -- found live, against a real free-tier model,
+            # returning `reasoning=""` with no way to tell whether the
+            # model call itself came back empty, wrapped its JSON
+            # differently than expected, or used unexpected field names.
+            # The raw text (truncated -- this can be a full essay from a
+            # chatty model) is the actual signal needed to tell those
+            # apart.
+            logger.warning("vision_decide_action_unrecognized_kind", kind=kind, raw=raw[:1000])
             kind = "stuck"
+            reasoning = f"model response had no recognized action kind; raw response: {raw[:300]!r}"
+        else:
+            reasoning = str(parsed.get("reasoning") or "")[:500]
         return ActionStep(
             kind=kind,
             x=parsed.get("x"),
             y=parsed.get("y"),
             text=parsed.get("text"),
-            reasoning=str(parsed.get("reasoning") or "")[:500],
+            reasoning=reasoning,
             screenshot_path=screenshot_path,
         )
     except Exception as exc:  # noqa: BLE001 - one bad decision must stop the loop cleanly, not crash it

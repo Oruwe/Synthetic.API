@@ -105,6 +105,27 @@ def test_decide_next_action_falls_back_to_stuck_on_unrecognized_kind(monkeypatch
     assert step.kind == "stuck"
 
 
+def test_decide_next_action_surfaces_the_raw_response_when_kind_is_unrecognized(monkeypatch, tmp_path):
+    """Regression test: found live, against a real free-tier model, that
+    an unparseable/empty response produced a "stuck" step with an EMPTY
+    reasoning field and nothing in the logs beyond `kind=None` -- no way
+    to tell whether the model call returned truly empty content, JSON
+    shaped differently than expected, or something else entirely. The
+    resulting ActionStep's reasoning must actually surface what came
+    back, not just say nothing happened."""
+    monkeypatch.setattr(
+        vision_wrapper._vision_agent,
+        "decide_action",
+        lambda image_ref, prompt, *, run_id, node_id: '{"unexpected_field": "the model ignored the schema"}',
+    )
+
+    step = decide_next_action(str(tmp_path / "shot.png"), "buy the item", [], run_id="r1", node_id="n1")
+
+    assert step.kind == "stuck"
+    assert step.reasoning != ""
+    assert "unexpected_field" in step.reasoning
+
+
 def test_decide_next_action_falls_back_to_stuck_on_malformed_response(monkeypatch, tmp_path):
     monkeypatch.setattr(
         vision_wrapper._vision_agent,
