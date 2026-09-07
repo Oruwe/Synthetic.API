@@ -6,7 +6,7 @@ with the offline/dependency-free test suite.
 
 from types import SimpleNamespace
 
-import agents.common.qdrant_store as qdrant_store
+from agents.common import qdrant_store
 from agents.common.qdrant_store import cosine_similarity, should_retain
 
 

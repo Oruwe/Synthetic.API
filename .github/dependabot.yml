@@ -1,0 +1,56 @@
+version: 2
+updates:
+  # Main Python dependency set (pyproject.toml/uv.lock).
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  # ui/, mock_portal/, demo_target/ each keep their own separate,
+  # deliberately minimal requirements.txt (see each Dockerfile's own
+  # comment for why) -- covered independently so an update to one doesn't
+  # wait on or get bundled with the others.
+  - package-ecosystem: "pip"
+    directory: "/ui"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "pip"
+    directory: "/mock_portal"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "pip"
+    directory: "/demo_target"
+    schedule:
+      interval: "weekly"
+
+  # Base images across every Dockerfile in this repo.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker"
+    directory: "/ui"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker"
+    directory: "/mock_portal"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker"
+    directory: "/demo_target"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker"
+    directory: "/deploy/huggingface"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker"
+    directory: "/deploy/render"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

@@ -2,15 +2,15 @@
 source. Corrupt files and the watcher's own seen-file must be skipped,
 not raised."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from agents.common import run_store
 from agents.common.config import settings
-from agents.common.models.dag import DAGPlan, RunState
+from agents.common.models.dag import DAGPlan
 
 
 def _plan(run_id: str) -> DAGPlan:
-    return DAGPlan(run_id=run_id, transcript="t", created_at=datetime.now(timezone.utc), nodes=[], edges=[])
+    return DAGPlan(run_id=run_id, transcript="t", created_at=datetime.now(UTC), nodes=[], edges=[])
 
 
 def test_list_runs_returns_all_saved_runs(tmp_path, monkeypatch):

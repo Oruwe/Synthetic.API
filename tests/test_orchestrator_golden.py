@@ -7,9 +7,9 @@ test suite.
 
 import pytest
 
-import agents.orchestrator.planner as planner
 from agents.common.models.dag import NodeType
 from agents.common.models.research import SearchResult
+from agents.orchestrator import planner
 
 
 def _node_types(plan):

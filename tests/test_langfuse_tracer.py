@@ -92,8 +92,9 @@ def test_traced_llm_call_succeeds_even_when_last_usage_has_a_colliding_key(monke
     monkeypatch.setattr(langfuse_tracer, "_get_client", lambda: _FakeClient())
 
     class _Wrapped:
-        last_model = "some-model"
-        last_usage = {"unit": "TOKENS", "input": 1, "output": 1, "total": 2}  # the colliding case
+        def __init__(self):
+            self.last_model = "some-model"
+            self.last_usage = {"unit": "TOKENS", "input": 1, "output": 1, "total": 2}  # the colliding case
 
         @langfuse_tracer.traced_llm_call(name="test_call")
         def run(self, system_prompt, user_input, *, run_id, node_id):

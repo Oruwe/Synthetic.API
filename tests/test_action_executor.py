@@ -10,6 +10,7 @@ is allowed to click/type on a real page.
 """
 
 from contextlib import contextmanager
+from datetime import UTC
 
 from agents.common.models.action import ActionStep
 from agents.web_navigator import action_executor
@@ -1057,11 +1058,11 @@ def test_extract_visible_text_falls_back_to_raw_body_text_when_trafilatura_finds
 
 
 def _prior_workflow(steps, start_url="https://example.test"):
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from agents.common.models.action import WorkflowMemory
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return WorkflowMemory(
         canonical_key="example.test:book a table",
         domain="example.test",
@@ -1137,10 +1138,12 @@ def test_replay_workflow_falls_back_to_live_loop_on_failure(tmp_path, monkeypatc
     live_loop_calls = []
 
     def fake_live_loop(intent, start_url, run_id, max_steps=None):
+        from datetime import datetime
+
         live_loop_calls.append((intent, start_url, run_id))
         return action_executor.ActionWorkflow(
             run_id=run_id, intent=intent, start_url=start_url, steps=[], success=True, refused_reason=None,
-            created_at=action_executor.datetime.now(action_executor.timezone.utc),
+            created_at=datetime.now(UTC),
         )
 
     monkeypatch.setattr(action_executor, "execute_action_loop", fake_live_loop)

@@ -12,19 +12,21 @@ one resume call that uses it. See PendingInputRequest's docstring
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
+import pytest
 
 from agents.common import run_store
 from agents.common.models.dag import DAGEdge, DAGNode, DAGPlan, NodeStatus, NodeType
 from agents.orchestrator import executor
-from agents.orchestrator.executor import AwaitingHumanInputError, RunContext
+from agents.orchestrator.executor import AwaitingHumanInputError
 
 
 def _plan(nodes, edges=None, **kwargs) -> DAGPlan:
     return DAGPlan(
         run_id=str(uuid.uuid4()),
         transcript="test transcript",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         nodes=nodes,
         edges=edges or [],
         **kwargs,
@@ -115,11 +117,8 @@ def test_resume_plan_raises_when_a_required_field_is_missing():
     plan = _plan([_node("fetch", key)])
     run = executor.execute_plan(plan)
 
-    try:
+    with pytest.raises(ValueError, match="email"):
         executor.resume_plan(run.run_id, {})
-        assert False, "expected ValueError"
-    except ValueError as exc:
-        assert "email" in str(exc)
 
 
 def test_resume_plan_raises_on_a_run_that_is_not_awaiting_input():
@@ -129,19 +128,13 @@ def test_resume_plan_raises_on_a_run_that_is_not_awaiting_input():
     run = executor.execute_plan(plan)
     assert run.overall_status == "completed"
 
-    try:
+    with pytest.raises(ValueError):
         executor.resume_plan(run.run_id, {"email": "x@example.com"})
-        assert False, "expected ValueError"
-    except ValueError:
-        pass
 
 
 def test_resume_plan_raises_on_an_unknown_run_id():
-    try:
+    with pytest.raises(ValueError):
         executor.resume_plan("does-not-exist", {"email": "x@example.com"})
-        assert False, "expected ValueError"
-    except ValueError:
-        pass
 
 
 def test_downstream_node_runs_normally_after_the_paused_node_resumes_successfully():

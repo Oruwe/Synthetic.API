@@ -17,7 +17,7 @@ behind it, in one continuous browser session.
 """
 
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 from agents.common import qdrant_store
@@ -130,14 +130,14 @@ def _pass_gate_and_extract(gate_page: FetchedPage, human_inputs: dict, run_id: s
             url=gate_page.url,
             title=gate_page.title,
             text=workflow.extracted_text,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             fetch_method="action_gate_bypass",
         )
     return FetchedPage(
         url=gate_page.url,
         title=gate_page.title,
         text="",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         fetch_method="action_gate_bypass",
         error=workflow.refused_reason or "could not get past the content gate with the information provided",
     )

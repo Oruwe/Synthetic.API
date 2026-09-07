@@ -21,7 +21,7 @@ import json
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from agents.common.config import settings
@@ -69,7 +69,7 @@ def _update_index(run: RunState) -> None:
         index = _read_index()
         index[run.run_id] = {
             "overall_status": run.overall_status,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
         }
         _write_atomic(_index_path(), json.dumps(index, indent=2))
 
@@ -99,7 +99,7 @@ def save_run(run: RunState) -> None:
     # RunState's own default_factory at construction and never touched
     # again, so every subsequent rewrite of a run file re-serialized the
     # same stale creation timestamp despite the file changing many times.
-    run.updated_at = datetime.now(timezone.utc)
+    run.updated_at = datetime.now(UTC)
     _write_atomic(_run_path(run.run_id), run.model_dump_json(indent=2))
     _update_index(run)
 

@@ -4,15 +4,15 @@ finding whose title/summary contains an injection pattern must be flagged
 applied to a different source (a real web page instead of a scraped
 portal row)."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-import agents.web_navigator.research_handlers as research_handlers
 from agents.common.models.research import ScreenshotCapture
 from agents.orchestrator.executor import RunContext
+from agents.web_navigator import research_handlers
 
 
 def _capture(url="https://example.test", title="Example") -> ScreenshotCapture:
-    return ScreenshotCapture(url=url, title=title, screenshot_path="/tmp/shot.png", captured_at=datetime.now(timezone.utc))
+    return ScreenshotCapture(url=url, title=title, screenshot_path="/tmp/shot.png", captured_at=datetime.now(UTC))
 
 
 def test_analyze_screenshots_flags_injected_summary(monkeypatch):
@@ -23,7 +23,7 @@ def test_analyze_screenshots_flags_injected_summary(monkeypatch):
 
         return VisionFinding(
             url=url, title=title, summary=poisoned_summary, screenshot_path=screenshot_path,
-            analyzed_at=datetime.now(timezone.utc),
+            analyzed_at=datetime.now(UTC),
         )
 
     monkeypatch.setattr(research_handlers, "analyze_screenshot", fake_analyze_screenshot)
@@ -46,14 +46,14 @@ def test_analyze_screenshots_skips_failed_captures(monkeypatch):
 
         return VisionFinding(
             url=url, title=title, summary="fine", screenshot_path=screenshot_path,
-            analyzed_at=datetime.now(timezone.utc),
+            analyzed_at=datetime.now(UTC),
         )
 
     monkeypatch.setattr(research_handlers, "analyze_screenshot", fake_analyze_screenshot)
 
     good = _capture(url="https://good.test")
     failed = ScreenshotCapture(
-        url="https://bad.test", title="Bad", screenshot_path="", captured_at=datetime.now(timezone.utc), error="timeout"
+        url="https://bad.test", title="Bad", screenshot_path="", captured_at=datetime.now(UTC), error="timeout"
     )
     ctx = RunContext(run_id="r1", data={"research_query": "q", "screenshot_captures": [good, failed]})
     research_handlers.handle_analyze_screenshots(node=None, ctx=ctx)

@@ -79,7 +79,7 @@ def _extract_chat_text(response) -> str:
     """
     if isinstance(response, dict):
         for key in ("response", "message", "content", "text"):
-            if key in response and response[key]:
+            if response.get(key):
                 return str(response[key])
     else:
         for attr in ("response", "message", "content", "text"):

@@ -10,10 +10,12 @@ threaded through as Lyzr's session_id, and that LyzrAgentWrapper still
 falls back to OpenRouter cleanly when the real Lyzr call fails.
 """
 
+from typing import ClassVar
+
 import lyzr_python_sdk
 import pytest
 
-import agents.common.lyzr_wrapper as lyzr_wrapper
+from agents.common import lyzr_wrapper
 from agents.common.config import settings
 from agents.common.lyzr_wrapper import LLMResult, LyzrAgentWrapper, LyzrBackend, _extract_chat_text
 
@@ -33,8 +35,13 @@ class _FakeLyzrAgentAPI:
         self.api_key = api_key
         self.inference = _FakeInference(_FakeLyzrAgentAPI.next_response)
 
-    # set by each test before constructing LyzrBackend's call
-    next_response = {"response": "default"}
+    # Deliberately class-level, not an instance default: _patch_lyzr_client
+    # below reassigns this on the CLASS itself before LyzrBackend.complete()
+    # constructs an instance, so each test configures its response before
+    # any instance exists to read it. ClassVar documents that intent
+    # explicitly rather than looking like an accidental shared mutable
+    # default.
+    next_response: ClassVar[dict] = {"response": "default"}
 
 
 def _patch_lyzr_client(monkeypatch, response):

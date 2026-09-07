@@ -2,8 +2,23 @@
 
 Every agent imports `settings` from here instead of reading `os.environ`
 directly, so there is exactly one place that knows the env var names.
+
+Validated eagerly at import time (`settings = Settings()` below runs at
+module load, not on first use) -- pydantic's own type coercion already
+did this implicitly; the validators below add real BUSINESS-RULE checks
+on top (a cross-field consistency pydantic's type system alone can't
+express), so a misconfiguration fails loudly and immediately on startup
+instead of silently degrading or surfacing as a confusing failure deep
+inside a run. Caught live, this exact class of bug: LYZR_ENABLED=true set
+without a real LYZR_AGENT_ID, which the pipeline itself would have
+silently absorbed (lyzr_wrapper.py's own fail-open design falls back to
+OpenRouter on any Lyzr error) -- worth knowing about at startup, not
+inferred later from "why does every trace show the fallback model."
 """
 
+import warnings
+
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -169,6 +184,58 @@ class Settings(BaseSettings):
     # --- Synthesizer polling ---
     synthesizer_poll_interval_seconds: float = 5.0
     notifier_webhook_url: str = ""
+
+    @model_validator(mode="after")
+    def _warn_if_lyzr_enabled_but_unusable(self) -> "Settings":
+        """Doesn't raise -- consistent with this codebase's fail-open
+        discipline everywhere else (lyzr_wrapper.py itself already falls
+        back to OpenRouter on exactly this condition, per-call, silently).
+        A loud startup warning is strictly more than that silent per-call
+        fallback ever gave an operator, without making config.py the one
+        place in this project that crashes instead of degrading."""
+        if self.lyzr_enabled and not self.lyzr_agent_id:
+            warnings.warn(
+                "LYZR_ENABLED=true but LYZR_AGENT_ID is not set -- every "
+                "call will fail Lyzr and fall back to OpenRouter (see "
+                "lyzr_wrapper.py). Set LYZR_AGENT_ID, or LYZR_ENABLED=false "
+                "to use the fallback intentionally instead of by accident.",
+                stacklevel=2,
+            )
+        if self.lyzr_enabled and not self.lyzr_api_key:
+            warnings.warn(
+                "LYZR_ENABLED=true but LYZR_API_KEY is not set -- every "
+                "call will fail Lyzr and fall back to OpenRouter.",
+                stacklevel=2,
+            )
+        return self
+
+    @field_validator(
+        "portal_base_url", "qdrant_url", "openrouter_base_url", "langfuse_host",
+    )
+    @classmethod
+    def _must_be_a_url_if_set(cls, value: str, info) -> str:
+        """Type coercion alone (bare `str`) accepts any string, including
+        an obvious typo like a bare hostname with no scheme -- pydantic
+        doesn't have a built-in "URL, but allow blank" type, so this
+        checks the one thing worth catching (a missing scheme) without
+        pulling in a full URL-parsing dependency for it."""
+        if value and not (value.startswith("http://") or value.startswith("https://")):
+            raise ValueError(f"{info.field_name} must start with http:// or https:// (got {value!r})")
+        return value
+
+    @field_validator("action_max_steps", "dag_circuit_breaker_threshold", "research_top_k", "research_max_results")
+    @classmethod
+    def _must_be_positive(cls, value: int, info) -> int:
+        if value <= 0:
+            raise ValueError(f"{info.field_name} must be positive (got {value})")
+        return value
+
+    @field_validator("action_workflow_replay_min_score", "action_workflow_min_trust_ratio")
+    @classmethod
+    def _must_be_a_valid_score(cls, value: float, info) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"{info.field_name} must be between 0.0 and 1.0 (got {value})")
+        return value
 
 
 settings = Settings()

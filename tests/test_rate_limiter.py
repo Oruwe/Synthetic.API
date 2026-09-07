@@ -1,7 +1,7 @@
 """Tests for the per-domain rate limiter: back-to-back requests to the
 SAME domain get throttled; different domains don't block each other."""
 
-import agents.web_navigator.rate_limiter as rate_limiter
+from agents.web_navigator import rate_limiter
 
 
 def test_second_request_to_same_domain_is_throttled(monkeypatch):

@@ -11,8 +11,8 @@ caller.
 
 import functools
 import logging as _stdlib_logging
-from datetime import datetime, timezone
-from typing import Callable
+from collections.abc import Callable
+from datetime import UTC, datetime
 
 from agents.common.config import settings
 from agents.common.logging import get_logger
@@ -122,7 +122,7 @@ def traced_llm_call(name: str) -> Callable:
         @functools.wraps(fn)
         def wrapper(self, system_prompt: str, user_input: str, *, run_id: str, node_id: str):
             client = _get_client()
-            started_at = datetime.now(timezone.utc)
+            started_at = datetime.now(UTC)
             trace = None
             if client is not None:
                 try:
@@ -145,7 +145,7 @@ def traced_llm_call(name: str) -> Callable:
                 raise
             else:
                 if trace is not None:
-                    ended_at = datetime.now(timezone.utc)
+                    ended_at = datetime.now(UTC)
                     # Set by LyzrAgentWrapper.run() (lyzr_wrapper.py) during
                     # the call above -- without these, every generation
                     # showed 0 tokens / $0.00 regardless of the real call,
@@ -182,7 +182,7 @@ def traced_vision_call(name: str) -> Callable:
         @functools.wraps(fn)
         def wrapper(self, image_ref: str, prompt: str, *, run_id: str, node_id: str):
             client = _get_client()
-            started_at = datetime.now(timezone.utc)
+            started_at = datetime.now(UTC)
             trace = None
             if client is not None:
                 try:
@@ -205,7 +205,7 @@ def traced_vision_call(name: str) -> Callable:
                 raise
             else:
                 if trace is not None:
-                    ended_at = datetime.now(timezone.utc)
+                    ended_at = datetime.now(UTC)
                     model = getattr(self, "last_model", None)
                     usage = _model_usage(getattr(self, "last_usage", None))
                     _safe(

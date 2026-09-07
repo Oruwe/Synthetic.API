@@ -21,5 +21,17 @@ jobs:
         # stale/mismatched lockfile pass CI unnoticed.
         run: uv sync --locked
 
-      - name: Run tests
-        run: uv run pytest -q
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Type-check (mypy)
+        run: uv run mypy agents/
+
+      - name: Run tests with coverage
+        # --cov-fail-under=80: a real gate, not just a reported number --
+        # verified against this repo's actual current coverage (86%
+        # overall, including the fully-untested dormant/retired pipelines
+        # -- see README's "What's dormant" -- which pull the number down;
+        # 80 leaves real headroom without being loose enough to be
+        # meaningless).
+        run: uv run pytest -q --cov=agents --cov-report=term-missing --cov-fail-under=80

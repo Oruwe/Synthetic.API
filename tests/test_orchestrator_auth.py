@@ -7,7 +7,7 @@ it's wired onto, plus the two routes that must stay open regardless
 without a credential).
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from fastapi import HTTPException
@@ -73,7 +73,7 @@ def test_trigger_succeeds_with_the_correct_key(monkeypatch):
 
 def test_get_run_returns_401_without_a_key_when_configured(monkeypatch):
     monkeypatch.setattr(settings, "orchestrator_api_key", "secret-key")
-    plan = DAGPlan(run_id="auth-test-run", transcript="t", created_at=datetime.now(timezone.utc), nodes=[], edges=[])
+    plan = DAGPlan(run_id="auth-test-run", transcript="t", created_at=datetime.now(UTC), nodes=[], edges=[])
     run_store.save_run(RunState(run_id="auth-test-run", plan=plan, node_states={}))
     client = TestClient(main.app)
 
@@ -84,7 +84,7 @@ def test_get_run_returns_401_without_a_key_when_configured(monkeypatch):
 
 def test_get_run_succeeds_with_the_correct_key(monkeypatch):
     monkeypatch.setattr(settings, "orchestrator_api_key", "secret-key")
-    plan = DAGPlan(run_id="auth-test-run-2", transcript="t", created_at=datetime.now(timezone.utc), nodes=[], edges=[])
+    plan = DAGPlan(run_id="auth-test-run-2", transcript="t", created_at=datetime.now(UTC), nodes=[], edges=[])
     run_store.save_run(RunState(run_id="auth-test-run-2", plan=plan, node_states={}))
     client = TestClient(main.app)
 
@@ -95,7 +95,7 @@ def test_get_run_succeeds_with_the_correct_key(monkeypatch):
 
 def test_resume_returns_401_without_a_key_when_configured(monkeypatch):
     monkeypatch.setattr(settings, "orchestrator_api_key", "secret-key")
-    plan = DAGPlan(run_id="auth-resume-run", transcript="t", created_at=datetime.now(timezone.utc), nodes=[], edges=[])
+    plan = DAGPlan(run_id="auth-resume-run", transcript="t", created_at=datetime.now(UTC), nodes=[], edges=[])
     run = RunState(
         run_id="auth-resume-run", plan=plan, node_states={}, overall_status="awaiting_human_input",
         pending_input=PendingInputRequest(fields=["email"], prompt="need info", url="https://gated.test", node_id="fetch"),

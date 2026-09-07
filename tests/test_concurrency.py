@@ -8,7 +8,7 @@ node completions racing to update the same shared index file.
 
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from agents.common import run_store
 from agents.common.config import settings
@@ -22,7 +22,7 @@ def _plan(run_id: str, handler_key: str) -> DAGPlan:
     return DAGPlan(
         run_id=run_id,
         transcript=f"transcript for {run_id}",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         nodes=[
             DAGNode(id="a", type=NodeType.FETCH_PAGES, name="a", handler_key=handler_key),
             DAGNode(id="b", type=NodeType.EMBED_PAGES, name="b", handler_key=handler_key, depends_on=["a"]),

@@ -4,7 +4,7 @@ outage must never block an otherwise-legitimate fetch."""
 
 import httpx
 
-import agents.web_navigator.robots as robots
+from agents.web_navigator import robots
 
 
 def _fake_response(status_code, text=""):

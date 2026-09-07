@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 
 from qdrant_client.http import models as qm
 
-from agents.common.lyzr_wrapper import LyzrAgentWrapper
 from agents.common.logging import get_logger
+from agents.common.lyzr_wrapper import LyzrAgentWrapper
 from agents.common.models.page import Source
 
 logger = get_logger(component="drafter")
@@ -41,7 +41,12 @@ def _flagged_field_names(flags: list[str] | None) -> set[str]:
 
 
 def _order_to_prompt_dict(record: qm.Record) -> dict:
-    payload = record.payload
+    # qdrant-client types payload as dict | None (a point can in principle
+    # carry no payload at all) -- every record this function actually sees
+    # has one, but guarding rather than assuming means a malformed/empty
+    # point degrades to blank fields instead of an AttributeError crashing
+    # the whole draft.
+    payload = record.payload or {}
     flagged_fields = _flagged_field_names(payload.get("flags"))
     run_id = payload.get("run_id")
 
@@ -99,7 +104,8 @@ _RESEARCH_SYSTEM_PROMPT = (
 
 
 def _finding_to_prompt_dict(record: qm.Record) -> dict:
-    payload = record.payload
+    # See _order_to_prompt_dict's comment above -- same reasoning.
+    payload = record.payload or {}
     flagged_fields = _flagged_field_names(payload.get("flags"))
     run_id = payload.get("run_id")
 

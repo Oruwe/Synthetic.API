@@ -3,7 +3,7 @@ isolation. The actual OpenRouter vision call is mocked -- no network,
 no API key needed, consistent with the rest of the offline test suite.
 """
 
-import agents.common.vision_wrapper as vision_wrapper
+from agents.common import vision_wrapper
 from agents.common.models.action import ActionStep
 from agents.common.vision_wrapper import _parse_json_response, analyze_screenshot, decide_next_action
 

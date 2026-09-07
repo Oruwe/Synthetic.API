@@ -4,7 +4,7 @@ degrade to an empty list, logged, never a raised exception."""
 
 import httpx
 
-import agents.common.search_wrapper as search_wrapper
+from agents.common import search_wrapper
 from agents.common.config import settings
 
 

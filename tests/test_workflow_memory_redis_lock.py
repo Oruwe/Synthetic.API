@@ -20,7 +20,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-import agents.common.qdrant_store as qdrant_store
+from agents.common import qdrant_store
 
 
 class _FakeRedis:

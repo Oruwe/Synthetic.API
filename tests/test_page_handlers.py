@@ -3,14 +3,14 @@ page_fetcher, handles zero search results gracefully, and owns the
 human-in-the-loop gated-content pause/resume) and embed_pages (per-page
 isolation -- one page's embedding failing must not lose the others)."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
-import agents.web_navigator.page_handlers as page_handlers
 from agents.common.models.action import ActionWorkflow
 from agents.common.models.page import FetchedPage
 from agents.orchestrator.executor import AwaitingHumanInputError, RunContext
+from agents.web_navigator import page_handlers
 
 
 def test_fetch_pages_handles_zero_search_results(monkeypatch):
@@ -28,7 +28,7 @@ def test_fetch_pages_handles_zero_search_results(monkeypatch):
 
 def test_fetch_pages_delegates_to_page_fetcher_with_results(monkeypatch):
     fake_pages = [
-        FetchedPage(url="https://a.test", title="A", text="content", timestamp=datetime.now(timezone.utc), fetch_method="http")
+        FetchedPage(url="https://a.test", title="A", text="content", timestamp=datetime.now(UTC), fetch_method="http")
     ]
     monkeypatch.setattr(page_handlers.page_fetcher, "fetch_pages", lambda results: fake_pages)
 
@@ -48,9 +48,9 @@ def test_fetch_pages_records_the_actual_success_count_onto_node_params(monkeypat
     semantically-retrieved chunks (which undercounts whenever more URLs
     fetch successfully than settings.research_top_k can represent)."""
     fake_pages = [
-        FetchedPage(url="https://a.test", title="A", text="content", timestamp=datetime.now(timezone.utc), fetch_method="http"),
-        FetchedPage(url="https://b.test", title="B", text="", timestamp=datetime.now(timezone.utc), fetch_method="http", error="404"),
-        FetchedPage(url="https://c.test", title="C", text="content", timestamp=datetime.now(timezone.utc), fetch_method="http"),
+        FetchedPage(url="https://a.test", title="A", text="content", timestamp=datetime.now(UTC), fetch_method="http"),
+        FetchedPage(url="https://b.test", title="B", text="", timestamp=datetime.now(UTC), fetch_method="http", error="404"),
+        FetchedPage(url="https://c.test", title="C", text="content", timestamp=datetime.now(UTC), fetch_method="http"),
     ]
     monkeypatch.setattr(page_handlers.page_fetcher, "fetch_pages", lambda results: fake_pages)
 
@@ -64,7 +64,7 @@ def test_fetch_pages_records_the_actual_success_count_onto_node_params(monkeypat
 
 def _gated_page(gate_reason="Subscribe to continue reading"):
     return FetchedPage(
-        url="https://gated.test", title="Gated", text="", timestamp=datetime.now(timezone.utc),
+        url="https://gated.test", title="Gated", text="", timestamp=datetime.now(UTC),
         fetch_method="http", gated=True, gate_reason=gate_reason,
     )
 
@@ -102,7 +102,7 @@ def test_fetch_pages_does_not_pause_when_another_source_already_has_content(monk
     run if the OTHERS already answer the question -- only pause when the
     gate is actually blocking the answer."""
     good_page = FetchedPage(
-        url="https://good.test", title="Good", text="real content here", timestamp=datetime.now(timezone.utc),
+        url="https://good.test", title="Good", text="real content here", timestamp=datetime.now(UTC),
         fetch_method="http",
     )
     gated_page = _gated_page()
@@ -125,7 +125,7 @@ def test_fetch_pages_uses_the_action_executor_on_resume_with_an_email(monkeypatc
         captured["start_url"] = start_url
         return ActionWorkflow(
             run_id=run_id, intent=intent, start_url=start_url, steps=[], success=True, refused_reason=None,
-            created_at=datetime.now(timezone.utc), extracted_text="the real unlocked article text",
+            created_at=datetime.now(UTC), extracted_text="the real unlocked article text",
         )
 
     monkeypatch.setattr(page_handlers.action_executor, "execute_action_loop", fake_loop)
@@ -154,7 +154,7 @@ def test_fetch_pages_uses_login_and_extract_on_resume_with_a_password(monkeypatc
         captured["password"] = password
         return ActionWorkflow(
             run_id=run_id, intent="log in", start_url=start_url, steps=[], success=True, refused_reason=None,
-            created_at=datetime.now(timezone.utc), extracted_text="member-only content",
+            created_at=datetime.now(UTC), extracted_text="member-only content",
         )
 
     monkeypatch.setattr(page_handlers.action_executor, "execute_login_and_extract", fake_login)
@@ -179,7 +179,7 @@ def test_fetch_pages_reports_a_clean_failure_when_the_gate_could_not_be_passed(m
         "execute_action_loop",
         lambda intent, start_url, run_id, on_success_extract=None: ActionWorkflow(
             run_id=run_id, intent=intent, start_url=start_url, steps=[], success=False,
-            refused_reason=None, created_at=datetime.now(timezone.utc),
+            refused_reason=None, created_at=datetime.now(UTC),
         ),
     )
 
@@ -194,8 +194,8 @@ def test_fetch_pages_reports_a_clean_failure_when_the_gate_could_not_be_passed(m
 
 
 def test_embed_pages_isolates_one_page_failure_from_the_rest(monkeypatch):
-    good_page = FetchedPage(url="https://good.test", title="Good", text="content", timestamp=datetime.now(timezone.utc), fetch_method="http")
-    bad_page = FetchedPage(url="https://bad.test", title="Bad", text="content", timestamp=datetime.now(timezone.utc), fetch_method="http")
+    good_page = FetchedPage(url="https://good.test", title="Good", text="content", timestamp=datetime.now(UTC), fetch_method="http")
+    bad_page = FetchedPage(url="https://bad.test", title="Bad", text="content", timestamp=datetime.now(UTC), fetch_method="http")
 
     def fake_upsert(page, question, run_id):
         if page.url == "https://bad.test":

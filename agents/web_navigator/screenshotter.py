@@ -9,7 +9,7 @@ fail the whole batch (same lesson as extractor.py's per-row isolation --
 applied here to per-URL capture instead of per-row parsing).
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from agents.common.config import settings
@@ -59,7 +59,7 @@ def _capture_one(browser, result: SearchResult, out_dir: Path, index: int) -> Sc
             url=result.url,
             title=result.title,
             screenshot_path=screenshot_path,
-            captured_at=datetime.now(timezone.utc),
+            captured_at=datetime.now(UTC),
         )
     except Exception as exc:  # noqa: BLE001 - one bad site must not fail the whole batch
         logger.warning("screenshot_capture_failed", url=result.url, error=str(exc))
@@ -67,6 +67,6 @@ def _capture_one(browser, result: SearchResult, out_dir: Path, index: int) -> Sc
             url=result.url,
             title=result.title,
             screenshot_path="",
-            captured_at=datetime.now(timezone.utc),
+            captured_at=datetime.now(UTC),
             error=str(exc),
         )

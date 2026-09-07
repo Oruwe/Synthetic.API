@@ -3,10 +3,10 @@ embed a fetched page) and semantic_search_pages (top-k vector retrieval,
 never raises). Fake client, stubbed embedder -- offline, deterministic.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
-import agents.common.qdrant_store as qdrant_store
+from agents.common import qdrant_store
 from agents.common.models.page import FetchedPage
 
 
@@ -47,7 +47,7 @@ class FakeClient:
 def _page(text="x" * 2000, error=None):
     return FetchedPage(
         url="https://example.test", title="Example", text=text if error is None else "",
-        timestamp=datetime.now(timezone.utc), fetch_method="http", error=error,
+        timestamp=datetime.now(UTC), fetch_method="http", error=error,
     )
 
 

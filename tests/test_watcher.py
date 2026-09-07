@@ -3,14 +3,14 @@ newly-completed runs (terminal overall_status) exactly once each via the
 lightweight index (list_run_summaries), leave in-progress runs alone, and
 periodically sweep for retention without doing so on every single poll."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from agents.common.models.dag import DAGPlan, RunState
 from agents.synthesizer import watcher
 
 
 def _run(run_id: str, overall_status: str) -> RunState:
-    plan = DAGPlan(run_id=run_id, transcript="t", created_at=datetime.now(timezone.utc), nodes=[], edges=[])
+    plan = DAGPlan(run_id=run_id, transcript="t", created_at=datetime.now(UTC), nodes=[], edges=[])
     return RunState(run_id=run_id, plan=plan, node_states={}, overall_status=overall_status)
 
 

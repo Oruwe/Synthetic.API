@@ -23,14 +23,15 @@ Real-world safety, non-negotiable, not left to the model's own compliance:
 import hashlib
 import re
 import time
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable
 
 from agents.common.config import settings
 from agents.common.logging import get_logger
 from agents.common.models.action import ActionStep, ActionWorkflow, WorkflowMemory
 from agents.common.playwright_utils import PAGE_DEFAULT_TIMEOUT_MS, launched_browser
+from agents.common.trafilatura_utils import extract_text_and_title
 from agents.common.vision_wrapper import decide_next_action
 
 logger = get_logger(component="action_executor")
@@ -86,7 +87,7 @@ def _page_signature(page) -> str | None:
     fail-open discipline everywhere else."""
     try:
         html = page.content()
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort by design, see docstring above
         return None
     return hashlib.sha256(html.encode("utf-8", errors="ignore")).hexdigest()
 
@@ -393,7 +394,7 @@ def execute_action_loop(
         steps=steps,
         success=success,
         refused_reason=refused_reason,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         extracted_text=extracted_text,
     )
 
@@ -493,7 +494,7 @@ def execute_login_and_extract(
             steps=[ActionStep(kind="stuck", reasoning="no credentials were provided")],
             success=False,
             refused_reason=None,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
 
     step_index = 0
@@ -653,7 +654,7 @@ def execute_login_and_extract(
         steps=steps,
         success=success,
         refused_reason=refused_reason,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         extracted_text=extracted_text,
     )
 
@@ -705,7 +706,7 @@ def replay_workflow(prior: WorkflowMemory, run_id: str) -> ActionWorkflow:
                         steps=executed,
                         success=False,
                         refused_reason=executed[-1].reasoning,
-                        created_at=datetime.now(timezone.utc),
+                        created_at=datetime.now(UTC),
                     )
 
                 page.screenshot(path=str(out_dir / f"step-{i:02d}.png"), full_page=False)
@@ -725,7 +726,7 @@ def replay_workflow(prior: WorkflowMemory, run_id: str) -> ActionWorkflow:
         steps=executed,
         success=True,
         refused_reason=None,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
 
 
@@ -745,7 +746,8 @@ def extract_visible_text(page) -> str:
 
     html = page.content()
     document = trafilatura.bare_extraction(html, with_metadata=False)
-    text = (document.text if document and document.text else "").strip()
+    text, _ = extract_text_and_title(document)
+    text = text.strip()
     if text:
         return text
     return (page.inner_text("body") or "").strip()[:20000]
@@ -768,7 +770,10 @@ _SNAP_TO_CLICKABLE_JS = (
         if (role && ["button", "link", "checkbox", "radio", "tab"].includes(role)) return true;
         return window.getComputedStyle(el).cursor === "pointer";
     };
-    const describe = (el) => el ? (el.tagName + (el.id ? "#" + el.id : "") + (ownText(el) ? " " + JSON.stringify(ownText(el).slice(0, 40)) : "")) : null;
+    const describe = (el) => el ? (
+        el.tagName + (el.id ? "#" + el.id : "") +
+        (ownText(el) ? " " + JSON.stringify(ownText(el).slice(0, 40)) : "")
+    ) : null;
 
     const direct = document.elementFromPoint(x, y);
     // Distances computed against EVERY clickable element on the page, not
@@ -903,12 +908,16 @@ def _execute_step(page, step: ActionStep, run_id: str | None = None) -> None:
         real_y = (step.y / 1000) * _VIEWPORT["height"]
 
     if step.kind == "click":
-        if real_x is None:
+        # Both checked, not just real_x -- they're always set together
+        # (line above), but only guarding one left the other's None-ness
+        # unverified for both the type checker and, more importantly, an
+        # actual future bug that broke that pairing.
+        if real_x is None or real_y is None:
             raise ValueError("click action missing coordinates")
         real_x, real_y = _snap_to_clickable(page, real_x, real_y, step.reasoning, run_id)
         page.mouse.click(real_x, real_y)
     elif step.kind == "type":
-        if real_x is not None:
+        if real_x is not None and real_y is not None:
             real_x, real_y = _snap_to_clickable(page, real_x, real_y, step.reasoning, run_id)
             page.mouse.click(real_x, real_y)  # focus the target field first
         page.keyboard.type(step.text or "")

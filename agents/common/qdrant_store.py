@@ -25,6 +25,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from urllib.parse import urlparse
 
 from fastembed import TextEmbedding
@@ -328,7 +329,12 @@ def upsert_candidate(finding: VisionFinding, run_id: str, query: str, client: Qd
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
+    # strict=True: both vectors always come from the same embedding model
+    # (same dimension) in real use -- a length mismatch means something
+    # upstream is already broken, and silently truncating to the shorter
+    # vector (zip's default) would produce a wrong-but-plausible-looking
+    # similarity score instead of the loud, immediate error this should be.
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(y * y for y in b))
     if norm_a == 0 or norm_b == 0:
@@ -366,17 +372,37 @@ def curate_candidates(run_id: str, query: str, threshold: float | None = None) -
     promote_ids: list[str] = []
     delete_ids: list[str] = []
     for record in candidates:
+        # record.vector is typed list[float] | list[list[float]] | dict |
+        # None by qdrant-client (a point can in principle carry named/sparse/
+        # multiple vectors) -- this collection only ever writes a single,
+        # unnamed, dense vector per point, so anything else here means a
+        # malformed point. Skip rather than crash the whole curation pass
+        # over one bad record.
+        if not isinstance(record.vector, list) or not record.vector or not isinstance(record.vector[0], float):
+            logger.warning("candidate_skipped_unexpected_vector_shape", point_id=str(record.id))
+            continue
         similarity = cosine_similarity(query_vector, record.vector)
+        # record.id is int | str | UUID (Qdrant's general PointId type) --
+        # this codebase always writes string ids; str() is a no-op for the
+        # ones we actually produce and safe regardless.
+        point_id = str(record.id)
         if should_retain(similarity, threshold):
-            promote_ids.append(record.id)
+            promote_ids.append(point_id)
         else:
-            delete_ids.append(record.id)
+            delete_ids.append(point_id)
 
     if promote_ids:
+        # cast, not a type: ignore -- list[str] IS a valid list[int | str |
+        # UUID | PointId] at runtime here (qdrant-client's own stub note
+        # points at exactly this: "list is invariant... consider Sequence
+        # instead"). A real Sequence-typed rewrite of promote_ids would
+        # avoid the cast entirely, but this is the standard, minimal,
+        # correct idiom for a list-invariance false positive rather than
+        # restructuring the surrounding function.
         client.set_payload(
             collection_name=settings.qdrant_research_collection,
             payload={"status": "permanent"},
-            points=promote_ids,
+            points=cast(list[int | str | uuid.UUID], promote_ids),
         )
     if delete_ids:
         client.delete(
@@ -431,7 +457,11 @@ def upsert_page_chunks(page: FetchedPage, question: str, run_id: str, client: Qd
 
     point_ids: list[str] = []
     points: list[qm.PointStruct] = []
-    for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
+    # strict=True: one vector per chunk is the whole contract of
+    # get_embedder().embed() -- a mismatch here means chunks would
+    # silently pair with the WRONG vector (zip's default truncation),
+    # corrupting which text a stored embedding actually represents.
+    for i, (chunk, vector) in enumerate(zip(chunks, vectors, strict=True)):
         point_key = f"{run_id}:{page.url}:{i}"
         points.append(
             qm.PointStruct(
@@ -568,7 +598,10 @@ def _scroll_all_matching(
         if seen_point_ids is None:
             matched.extend(records)
         else:
-            matched.extend(r for r in records if r.payload.get("point_key") not in seen_point_ids)
+            # r.payload is dict | None by qdrant-client's own typing -- see
+            # this module's other payload-guard comments for why this is
+            # worth guarding rather than assuming.
+            matched.extend(r for r in records if (r.payload or {}).get("point_key") not in seen_point_ids)
         if next_offset is None:
             break
         offset = next_offset

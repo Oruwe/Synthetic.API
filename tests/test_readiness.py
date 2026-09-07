@@ -3,7 +3,7 @@ readiness to False; missing API keys are reported but degrade gracefully
 rather than failing readiness (the system still answers, just with fewer
 sources / template drafts -- see agents/common/readiness.py)."""
 
-import agents.common.readiness as readiness
+from agents.common import readiness
 from agents.common.config import settings
 
 
@@ -52,4 +52,3 @@ class _FakeClient:
     def get_collections(self):
         if self._raises:
             raise RuntimeError("connection refused")
-        return None

@@ -10,9 +10,9 @@ search_wrapper.search() is mocked so these stay offline and deterministic,
 same convention as test_orchestrator_golden.py.
 """
 
-import agents.orchestrator.planner as planner
 from agents.common.models.dag import NodeType
 from agents.common.models.research import SearchResult
+from agents.orchestrator import planner
 
 
 def _search(url="https://portal.test/signup"):

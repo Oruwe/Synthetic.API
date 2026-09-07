@@ -7,7 +7,7 @@ interfere with each other via the shared HANDLER_REGISTRY.
 
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -20,7 +20,7 @@ def _plan(nodes, edges=None, **kwargs) -> DAGPlan:
     return DAGPlan(
         run_id=str(uuid.uuid4()),
         transcript="test transcript",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         nodes=nodes,
         edges=edges or [],
         **kwargs,
@@ -119,7 +119,7 @@ def test_run_state_persisted_and_reloadable():
     executor.register_handler(key)(lambda node, ctx: "done")
 
     plan = _plan([_node("a", key)])
-    run = executor.execute_plan(plan)
+    executor.execute_plan(plan)  # persistence is the point of this test -- read back from disk below, not the return value
 
     reloaded = run_store.load_run(plan.run_id)
     assert reloaded is not None
@@ -237,7 +237,7 @@ def _action_workflow(success=True, refused_reason=None, run_id="r1"):
         steps=[ActionStep(kind="click", x=1, y=1, reasoning="click search"), ActionStep(kind="done", reasoning="done")],
         success=success,
         refused_reason=refused_reason,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
 
 

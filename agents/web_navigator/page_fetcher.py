@@ -47,6 +47,7 @@ from agents.common.logging import get_logger
 from agents.common.models.page import FetchedPage
 from agents.common.models.research import SearchResult
 from agents.common.playwright_utils import launched_browser
+from agents.common.trafilatura_utils import extract_text_and_title
 from agents.web_navigator import rate_limiter, robots
 
 logger = get_logger(component="page_fetcher")
@@ -199,7 +200,8 @@ def _fetch_fast(result: SearchResult, timeout_seconds: float) -> FetchedPage | N
         return _extract_pdf_page(result, response.content)
 
     document = trafilatura.bare_extraction(response.text, with_metadata=True)
-    text = (document.text if document and document.text else "").strip()
+    text, doc_title = extract_text_and_title(document)
+    text = text.strip()
     if len(text.split()) < _MIN_ACCEPTABLE_WORD_COUNT:
         gate_reason = _detect_gate_phrase(response.text)
         if gate_reason:
@@ -214,7 +216,7 @@ def _fetch_fast(result: SearchResult, timeout_seconds: float) -> FetchedPage | N
             )
         return None  # too little content, no gate signal either -- let the caller try the Playwright fallback
 
-    title = (document.title if document and document.title else None) or result.title
+    title = doc_title or result.title
     return FetchedPage(
         url=result.url,
         title=title,
@@ -311,8 +313,9 @@ def _fetch_with_playwright(result: SearchResult, timeout_seconds: float) -> Fetc
         html = page.content()
 
     document = trafilatura.bare_extraction(html, with_metadata=True)
-    text = (document.text if document and document.text else "").strip()
-    title = (document.title if document and document.title else None) or result.title
+    text, doc_title = extract_text_and_title(document)
+    text = text.strip()
+    title = doc_title or result.title
     if len(text.split()) < _MIN_ACCEPTABLE_WORD_COUNT:
         gate_reason = _detect_gate_phrase(html)
         if gate_reason:

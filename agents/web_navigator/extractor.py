@@ -7,7 +7,7 @@ free-text fields for injection patterns. No LLM call happens anywhere in
 this file.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from pydantic import ValidationError
 
@@ -31,7 +31,7 @@ def extract_orders(
     orders: list[DelayedOrder] = []
     guard_flags_total = 0
     skipped_count = 0
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     for raw in raw_rows:
         if only_status and raw.get("status") != only_status:

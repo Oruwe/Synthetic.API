@@ -5,7 +5,7 @@ executor.execute_plan to report synchronously. Both qdrant_store and
 action_executor are mocked -- offline, deterministic.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from agents.common.models.action import ActionStep, ActionWorkflow, WorkflowMemory
 from agents.common.models.dag import DAGNode, NodeType
@@ -31,7 +31,7 @@ def _workflow(success=True):
         steps=[ActionStep(kind="done", reasoning="done")],
         success=success,
         refused_reason=None,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
 
 
@@ -44,9 +44,9 @@ def _memory():
         steps=[ActionStep(kind="done", reasoning="done")],
         success_count=3,
         failure_count=0,
-        created_at=datetime.now(timezone.utc),
-        last_used_at=datetime.now(timezone.utc),
-        last_success_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
+        last_used_at=datetime.now(UTC),
+        last_success_at=datetime.now(UTC),
     )
 
 
@@ -120,7 +120,6 @@ def test_passes_start_url_to_the_memory_lookup_for_domain_filtering(monkeypatch)
     def fake_find(intent, start_url=None):
         captured["intent"] = intent
         captured["start_url"] = start_url
-        return None
 
     monkeypatch.setattr(action_handlers.qdrant_store, "find_workflow_memory", fake_find)
     monkeypatch.setattr(action_handlers.action_executor, "execute_action_loop", lambda *a, **k: _workflow())

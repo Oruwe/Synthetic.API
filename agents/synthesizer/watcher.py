@@ -26,8 +26,8 @@ poll O(1) plus O(newly-terminal runs), which is normally 0 or 1.
 
 import json
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from agents.common import qdrant_store, run_store
 from agents.common.config import settings

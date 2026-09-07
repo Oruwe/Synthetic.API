@@ -34,7 +34,7 @@ rather than deleted.
 
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from agents.common import search_wrapper
 from agents.common.config import settings
@@ -86,7 +86,7 @@ def build_plan(transcript: str, run_id: str | None = None) -> DAGPlan:
         raise PlannerInputError("transcript is empty")
 
     run_id = run_id or str(uuid.uuid4())
-    created_at = datetime.now(timezone.utc)
+    created_at = datetime.now(UTC)
     question = transcript.strip()
 
     if _looks_like_action_intent(question):

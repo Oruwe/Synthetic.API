@@ -34,6 +34,7 @@ from agents.orchestrator import omi_webhook, planner
 from agents.orchestrator.auth import require_api_key
 from agents.orchestrator.executor import execute_plan, resume_plan
 from agents.web_navigator import action_handlers, page_handlers  # noqa: F401 - registers handlers
+
 # NOTE: agents.orchestrator.handlers, agents.web_navigator.handlers, and
 # agents.web_navigator.research_handlers registered the shipping-portal and
 # DDG+vision pipelines' DAG node handlers. Both pipelines are retired from

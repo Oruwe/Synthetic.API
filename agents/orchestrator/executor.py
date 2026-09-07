@@ -8,10 +8,12 @@ used only for topological ordering + cycle detection, not as a runtime.
 
 import contextvars
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Callable
+from datetime import UTC, datetime
+from typing import Any
 
 import networkx as nx
 
@@ -21,7 +23,6 @@ from agents.common.models.action import ActionWorkflow
 from agents.common.models.dag import (
     DAGNode,
     DAGPlan,
-    NodeExecutionState,
     NodeStatus,
     NodeType,
     PendingInputRequest,
@@ -219,6 +220,12 @@ def _walk_plan(
 
         paused = _run_node_with_retry(run, node, ctx)
         if paused:
+            # _run_node_with_retry's only `return True` path always sets
+            # run.pending_input first (its AwaitingHumanInputError handler,
+            # right before returning) -- asserting it here documents that
+            # real invariant explicitly rather than letting a bare
+            # optional-attribute access assume it silently.
+            assert run.pending_input is not None
             run.overall_status = "awaiting_human_input"
             run_store.save_run(run)
             logger.info("run_awaiting_human_input", node_id=node_id, fields=run.pending_input.fields)
@@ -294,7 +301,7 @@ def _run_node_with_retry(run: RunState, node: DAGNode, ctx: RunContext) -> bool:
     for attempt in range(1, node.max_retries + 1):
         state.attempts = attempt
         state.status = NodeStatus.RUNNING if attempt == 1 else NodeStatus.RETRYING
-        state.started_at = datetime.now(timezone.utc)
+        state.started_at = datetime.now(UTC)
         run_store.update_node_state(run, node.id, state)
         logger.info("node_attempt_started", attempt=attempt, max_retries=node.max_retries)
 
@@ -338,7 +345,7 @@ def _run_node_with_retry(run: RunState, node: DAGNode, ctx: RunContext) -> bool:
             # the same unanswerable question node.max_retries times.
             state.status = NodeStatus.AWAITING_INPUT
             state.last_error = None
-            state.finished_at = datetime.now(timezone.utc)
+            state.finished_at = datetime.now(UTC)
             run_store.update_node_state(run, node.id, state)
             run.pending_input = PendingInputRequest(
                 fields=exc.fields, prompt=exc.prompt, url=exc.url, node_id=node.id
@@ -350,7 +357,7 @@ def _run_node_with_retry(run: RunState, node: DAGNode, ctx: RunContext) -> bool:
             logger.warning("node_attempt_failed", attempt=attempt, error=error)
         else:
             state.status = NodeStatus.SUCCEEDED
-            state.finished_at = datetime.now(timezone.utc)
+            state.finished_at = datetime.now(UTC)
             state.result_summary = str(result)[:200] if result is not None else None
             run_store.update_node_state(run, node.id, state)
             logger.info("node_succeeded", attempt=attempt)
@@ -360,7 +367,7 @@ def _run_node_with_retry(run: RunState, node: DAGNode, ctx: RunContext) -> bool:
             time.sleep(node.retry_backoff_seconds * attempt)
 
     state.status = NodeStatus.FAILED
-    state.finished_at = datetime.now(timezone.utc)
+    state.finished_at = datetime.now(UTC)
     state.last_error = f"{error} (exhausted {node.max_retries} retries)"
     run_store.update_node_state(run, node.id, state)
     run.failure_count += 1
@@ -372,7 +379,7 @@ def _transition(run: RunState, node_id: str, status: NodeStatus, *, last_error: 
     state = run.node_states[node_id]
     state.status = status
     state.last_error = last_error
-    state.finished_at = datetime.now(timezone.utc)
+    state.finished_at = datetime.now(UTC)
     run_store.update_node_state(run, node_id, state)
 
 

@@ -12,7 +12,7 @@ vendor's closed multimodal API.
 import base64
 import json
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from agents.common.config import settings
@@ -154,7 +154,7 @@ def analyze_screenshot(url: str, title: str, screenshot_path: str, query: str, *
         summary=str(parsed.get("summary") or "")[:2000],
         key_facts=[str(f)[:300] for f in (parsed.get("key_facts") or [])][:5],
         screenshot_path=screenshot_path,
-        analyzed_at=datetime.now(timezone.utc),
+        analyzed_at=datetime.now(UTC),
     )
 
 

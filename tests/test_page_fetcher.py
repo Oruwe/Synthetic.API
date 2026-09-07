@@ -288,8 +288,14 @@ def test_fetch_one_routes_pdf_url_straight_to_pdf_path_never_playwright(monkeypa
         url=result.url, title=result.title, text="pdf content " * 10,
         timestamp=__import__("datetime").datetime.now(__import__("datetime").timezone.utc), fetch_method="pdf",
     ))
-    monkeypatch.setattr(page_fetcher, "_fetch_fast", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not try HTML fast path for a PDF URL")))
-    monkeypatch.setattr(page_fetcher, "_fetch_with_playwright", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not try Playwright for a PDF URL")))
+    monkeypatch.setattr(
+        page_fetcher, "_fetch_fast",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not try HTML fast path for a PDF URL")),
+    )
+    monkeypatch.setattr(
+        page_fetcher, "_fetch_with_playwright",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not try Playwright for a PDF URL")),
+    )
 
     page = page_fetcher._fetch_one(_result(url="https://example.test/report.pdf"), timeout_seconds=9)
 

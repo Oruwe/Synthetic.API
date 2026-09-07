@@ -8,7 +8,7 @@ not the HTTP layer itself, but this endpoint's own request validation is
 real logic worth proving, not just wiring.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
@@ -18,7 +18,7 @@ from agents.orchestrator import main
 
 
 def _paused_run(run_id: str, fields=("email",)) -> RunState:
-    plan = DAGPlan(run_id=run_id, transcript="t", created_at=datetime.now(timezone.utc), nodes=[], edges=[])
+    plan = DAGPlan(run_id=run_id, transcript="t", created_at=datetime.now(UTC), nodes=[], edges=[])
     run = RunState(
         run_id=run_id,
         plan=plan,
@@ -39,7 +39,7 @@ def test_resume_returns_404_for_an_unknown_run():
 
 
 def test_resume_returns_409_when_the_run_is_not_awaiting_input(monkeypatch):
-    plan = DAGPlan(run_id="not-paused", transcript="t", created_at=datetime.now(timezone.utc), nodes=[], edges=[])
+    plan = DAGPlan(run_id="not-paused", transcript="t", created_at=datetime.now(UTC), nodes=[], edges=[])
     run = RunState(run_id="not-paused", plan=plan, node_states={}, overall_status="completed")
     run_store.save_run(run)
 

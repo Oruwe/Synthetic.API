@@ -15,10 +15,10 @@ piling up near-duplicate points. See WorkflowMemory's own docstring
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-import agents.common.qdrant_store as qdrant_store
+from agents.common import qdrant_store
 from agents.common.models.action import ActionStep, ActionWorkflow, WorkflowMemory
 
 
@@ -71,7 +71,7 @@ def _workflow(success=True, intent="find the cheapest flight to Goa", start_url=
         steps=[ActionStep(kind="click", x=500, y=500, reasoning="click search"), ActionStep(kind="done", reasoning="done")],
         success=success,
         refused_reason=None,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
 
 
@@ -84,9 +84,9 @@ def _memory_payload(**overrides) -> dict:
         steps=[ActionStep(kind="done", reasoning="done")],
         success_count=3,
         failure_count=1,
-        created_at=datetime.now(timezone.utc) - timedelta(days=1),
-        last_used_at=datetime.now(timezone.utc) - timedelta(hours=1),
-        last_success_at=datetime.now(timezone.utc) - timedelta(hours=1),
+        created_at=datetime.now(UTC) - timedelta(days=1),
+        last_used_at=datetime.now(UTC) - timedelta(hours=1),
+        last_success_at=datetime.now(UTC) - timedelta(hours=1),
     )
     return base.model_copy(update=overrides).model_dump(mode="json")
 
@@ -376,7 +376,7 @@ def test_domain_of_strips_www_and_never_raises_on_garbage():
 
 def test_prune_stale_workflows_deletes_old_untrusted_records(monkeypatch):
     old_untrusted = _memory_payload(
-        canonical_key="a", success_count=0, failure_count=3, last_used_at=datetime.now(timezone.utc) - timedelta(days=30)
+        canonical_key="a", success_count=0, failure_count=3, last_used_at=datetime.now(UTC) - timedelta(days=30)
     )
     client = FakeClient(existing_points={"point-a": old_untrusted})
     monkeypatch.setattr(qdrant_store, "_client", client)
@@ -407,7 +407,7 @@ def test_prune_stale_workflows_honors_an_explicitly_injected_client(monkeypatch)
     monkeypatch.setattr(qdrant_store, "_client", AlwaysBrokenClient())
 
     old_untrusted = _memory_payload(
-        canonical_key="a", success_count=0, failure_count=3, last_used_at=datetime.now(timezone.utc) - timedelta(days=30)
+        canonical_key="a", success_count=0, failure_count=3, last_used_at=datetime.now(UTC) - timedelta(days=30)
     )
     injected_client = FakeClient(existing_points={"point-a": old_untrusted})
 
@@ -419,7 +419,7 @@ def test_prune_stale_workflows_honors_an_explicitly_injected_client(monkeypatch)
 
 def test_prune_stale_workflows_never_deletes_a_trusted_record_regardless_of_age(monkeypatch):
     old_trusted = _memory_payload(
-        canonical_key="b", success_count=10, failure_count=1, last_used_at=datetime.now(timezone.utc) - timedelta(days=365)
+        canonical_key="b", success_count=10, failure_count=1, last_used_at=datetime.now(UTC) - timedelta(days=365)
     )
     client = FakeClient(existing_points={"point-b": old_trusted})
     monkeypatch.setattr(qdrant_store, "_client", client)

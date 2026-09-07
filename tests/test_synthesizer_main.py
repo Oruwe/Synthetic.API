@@ -6,13 +6,14 @@ answer an API caller actually wants back.
 draft_answer() returns a DraftedAnswer, not a bare string -- see
 drafter.py's DraftedAnswer / tests/test_drafter_page_answers.py."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from agents.common import run_store
 from agents.common.config import settings
 from agents.common.models.dag import DAGNode, DAGPlan, NodeType
 from agents.common.models.page import Source
-from agents.synthesizer import drafter, main as synthesizer_main
+from agents.synthesizer import drafter
+from agents.synthesizer import main as synthesizer_main
 
 
 def _plan_with_fetch_node(run_id: str, fetch_params: dict | None = None) -> DAGPlan:
@@ -20,7 +21,7 @@ def _plan_with_fetch_node(run_id: str, fetch_params: dict | None = None) -> DAGP
     if fetch_params:
         params.update(fetch_params)
     node = DAGNode(id="fetch", type=NodeType.FETCH_PAGES, name="fetch", handler_key="fetch_pages", params=params)
-    return DAGPlan(run_id=run_id, transcript="What is X?", created_at=datetime.now(timezone.utc), nodes=[node], edges=[])
+    return DAGPlan(run_id=run_id, transcript="What is X?", created_at=datetime.now(UTC), nodes=[node], edges=[])
 
 
 def _drafted(text="the drafted answer", sources=None, attempted=1, succeeded=1):

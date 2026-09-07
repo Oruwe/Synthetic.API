@@ -5,8 +5,8 @@ walks it in topological order, persisting a `RunState` after every node
 transition so a run is inspectable mid-flight (`data/runs/<run_id>.json`).
 """
 
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -15,7 +15,7 @@ from agents.common.models.action import ActionWorkflow
 from agents.common.models.page import Source
 
 
-class NodeType(str, Enum):
+class NodeType(StrEnum):
     SCRAPE_PORTAL = "scrape_portal"
     EXTRACT_VALIDATE = "extract_validate"
     EMBED_STORE = "embed_store"
@@ -74,7 +74,7 @@ class DAGPlan(BaseModel):
     unsupported_subintents: list[str] = Field(default_factory=list)
 
 
-class NodeStatus(str, Enum):
+class NodeStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     RETRYING = "retrying"
@@ -150,7 +150,7 @@ class RunState(BaseModel):
     # datetime, which can't even be compared to an aware one without
     # raising TypeError, caught by run_store.save_run()'s own test after
     # that function started actually reassigning this field on every save.
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     # Set by the Synthesizer once it drafts an answer for this run (see
     # agents/synthesizer/main.py) and persisted back via run_store.save_run
     # so GET /runs/{run_id} can hand it back directly -- before this field
