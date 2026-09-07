@@ -37,7 +37,7 @@
 # without them, just without a trace UI and with an in-process (not
 # cross-process-distributed) workflow-memory lock, which is correct anyway
 # for a single container with no horizontal scaling.
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
