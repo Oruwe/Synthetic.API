@@ -10,6 +10,7 @@ caller.
 """
 
 import functools
+import logging as _stdlib_logging
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -20,6 +21,52 @@ logger = get_logger(component="langfuse_tracer")
 
 _langfuse_client = None
 _langfuse_init_attempted = False
+
+
+class _SDKLogForwardingHandler(_stdlib_logging.Handler):
+    """Catches the Langfuse SDK's OWN internal `logging.getLogger("langfuse")`
+    calls (see langfuse/parse_error.py's handle_exception/handle_fern_exception)
+    and routes them through this project's structlog logger instead.
+
+    Why this exists: the SDK batches trace/generation events and flushes them
+    on a background thread we don't control -- every try/except in this file
+    only covers the *synchronous* enqueue call (trace()/generation() themselves
+    essentially never raise; they just append to a local queue), so a real send
+    failure (bad/missing API keys, self-hosted instance unreachable, a 4xx from
+    a malformed event) surfaces later, on that background thread, via the SDK's
+    own stdlib logger -- confirmed live: a run with no LANGFUSE_PUBLIC_KEY/
+    LANGFUSE_SECRET_KEY set printed exactly this ("Unexpected error occurred.
+    Please check your request and contact support: https://langfuse.com/
+    support.") straight to stdout mid-run, indistinguishable from a real
+    pipeline crash next to this project's structured JSON log lines, even
+    though the run itself completed successfully (fail-open working exactly
+    as designed -- just not observable as such). Tagging it and routing it
+    through the same logger as everything else fixes that without touching
+    agents/common/logging.py's deliberate bare `%(message)s` root format,
+    which other third-party loggers may still rely on."""
+
+    def emit(self, record: _stdlib_logging.LogRecord) -> None:
+        try:
+            log_fn = logger.error if record.levelno >= _stdlib_logging.ERROR else logger.warning
+            log_fn("langfuse_sdk_background_failure", detail=record.getMessage())
+        except Exception:  # noqa: BLE001 - a logging handler must never itself raise
+            pass
+
+
+def _install_sdk_log_forwarding() -> None:
+    """Idempotent -- safe to call more than once (e.g. module re-imported
+    under test) without stacking duplicate handlers."""
+    sdk_logger = _stdlib_logging.getLogger("langfuse")
+    if any(isinstance(h, _SDKLogForwardingHandler) for h in sdk_logger.handlers):
+        return
+    sdk_logger.addHandler(_SDKLogForwardingHandler())
+    # Don't ALSO let it fall through to the root logger's bare-message
+    # handler (agents/common/logging.py's configure_logging) -- that would
+    # print the same failure twice, once tagged and once raw.
+    sdk_logger.propagate = False
+
+
+_install_sdk_log_forwarding()
 
 
 def _get_client():
@@ -87,7 +134,14 @@ def traced_llm_call(name: str) -> Callable:
                 result = fn(self, system_prompt, user_input, run_id=run_id, node_id=node_id)
             except Exception as exc:
                 if trace is not None:
-                    _safe(lambda: trace.update(output={"error": str(exc)}, level="ERROR"))
+                    # Capture the message into a plain local BEFORE the
+                    # lambda, not `str(exc)` inside it -- Python deletes the
+                    # `except ... as exc` binding when this block ends, so a
+                    # closure over `exc` itself only works today because
+                    # _safe() happens to invoke it synchronously; capturing
+                    # the string now removes that fragile assumption.
+                    error_str = str(exc)
+                    _safe(lambda: trace.update(output={"error": error_str}, level="ERROR"))
                 raise
             else:
                 if trace is not None:
@@ -140,7 +194,14 @@ def traced_vision_call(name: str) -> Callable:
                 result = fn(self, image_ref, prompt, run_id=run_id, node_id=node_id)
             except Exception as exc:
                 if trace is not None:
-                    _safe(lambda: trace.update(output={"error": str(exc)}, level="ERROR"))
+                    # Capture the message into a plain local BEFORE the
+                    # lambda, not `str(exc)` inside it -- Python deletes the
+                    # `except ... as exc` binding when this block ends, so a
+                    # closure over `exc` itself only works today because
+                    # _safe() happens to invoke it synchronously; capturing
+                    # the string now removes that fragile assumption.
+                    error_str = str(exc)
+                    _safe(lambda: trace.update(output={"error": error_str}, level="ERROR"))
                 raise
             else:
                 if trace is not None:
