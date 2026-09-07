@@ -35,12 +35,12 @@ Usage:
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agents.common.config import settings  # noqa: E402
+from agents.common.config import settings
 
 
 def main() -> int:
@@ -92,7 +92,7 @@ def main() -> int:
     plan = DAGPlan(
         run_id=args.run_id,
         transcript=f"what does the {args.page} page at {gate_url} say",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         nodes=[
             DAGNode(
                 id="fetch",
@@ -150,7 +150,7 @@ def main() -> int:
     if password_leaked:
         print("FAIL: the password ended up in persisted run state.", file=sys.stderr)
         return 3
-    if run.overall_status != "completed" and run.overall_status != "running":
+    if run.overall_status not in ("completed", "running"):
         # "running" is fine here: with only one node in this hand-built
         # plan, a successful gate-pass leaves the DAG with nothing left to
         # walk, so it should be "completed" -- but print whatever it

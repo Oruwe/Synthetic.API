@@ -40,9 +40,15 @@ RUN pip install --no-cache-dir uv
 # every other agents/ dependency (see pyproject.toml's
 # [project.optional-dependencies] -- named for the first target it was
 # built for, reused verbatim here since the dependency need is identical).
-# The docker-compose deployment never installs this extra, so
-# agents-orchestrator/agents-synthesizer's own images are unaffected.
-RUN uv sync --frozen --no-dev --extra hf-space || uv sync --no-dev --extra hf-space
+# --group demo-target adds demo_target's own Flask dependency into that
+# SAME venv too (see pyproject.toml's [dependency-groups] comment for why
+# this is a group, not its own requirements.txt or another extra) -- one
+# container/process group here, unlike docker-compose's separate
+# demo_target service+image, so both belong in the one environment.
+# agents-orchestrator/agents-synthesizer's own docker-compose images never
+# install either.
+RUN uv sync --frozen --no-dev --extra hf-space --group demo-target \
+    || uv sync --no-dev --extra hf-space --group demo-target
 
 # Playwright's Chromium, with its headless-mode system lib deps.
 RUN uv run playwright install --with-deps chromium
@@ -52,11 +58,6 @@ RUN uv run playwright install --with-deps chromium
 # free-tier host, possibly network-restricted) download on the demo's
 # critical path.
 RUN uv run python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-small-en-v1.5')"
-
-# demo_target's own (separate, lightweight) Flask dependency -- folded
-# into this same venv since this is one container/process group, unlike
-# docker-compose's separate demo_target service+image.
-RUN uv pip install -r demo_target/requirements.txt
 
 RUN chmod +x /app/deploy/common/start.sh
 

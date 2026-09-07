@@ -22,7 +22,12 @@ services:
       retries: 10
 
   mock_portal:
-    build: ./mock_portal
+    # context: . (repo root), not ./mock_portal -- mock_portal/Dockerfile
+    # needs the root pyproject.toml/uv.lock to install its own dependency
+    # group (see that Dockerfile's own comment).
+    build:
+      context: .
+      dockerfile: mock_portal/Dockerfile
     restart: unless-stopped
     # Internal fixture only, reached by the agent containers via
     # http://mock_portal:5000 on the docker network -- loopback-only on
@@ -48,7 +53,10 @@ services:
   # in README's Ambient RPA section, applied to testing too, not just
   # the live demo.
   demo_target:
-    build: ./demo_target
+    # context: . -- see mock_portal's identical build: comment above.
+    build:
+      context: .
+      dockerfile: demo_target/Dockerfile
     restart: unless-stopped
     # Same reasoning as mock_portal above: reached internally via
     # http://demo_target:5050, loopback-only on the host. Not something
@@ -213,7 +221,10 @@ services:
   # curl/bash scripts aren't a great surface for a judge or a live demo.
   # See ui/app.py for why voice input/output are handled the way they are.
   demo-ui:
-    build: ./ui
+    # context: . -- see mock_portal's identical build: comment above.
+    build:
+      context: .
+      dockerfile: ui/Dockerfile
     restart: unless-stopped
     # Public: this is the actual product's UI.
     ports:

@@ -188,7 +188,10 @@ def ask(question: str):
         yield f"⚠️ Unexpected response from Orchestrator: {body}", "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, None
         return
 
-    yield f"● Run `{run_id}` started — searching the web, fetching pages, and embedding...", "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, run_id
+    yield (
+        f"● Run `{run_id}` started — searching the web, fetching pages, and embedding...",
+        "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, run_id,
+    )
 
     # The DAG (fetch -> embed) finishing and the Synthesizer actually
     # drafting an answer are two SEPARATE, asynchronous steps: the
