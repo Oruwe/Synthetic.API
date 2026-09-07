@@ -98,11 +98,66 @@ _STALL_CORRECTION_HINT = (
     "significant margin, not just a few pixels."
 )
 
-_FIND_BY_REASONING_ANYWHERE_JS = """
-(reasoning) => {
+# Shared by both matching tiers (_SNAP_TO_CLICKABLE_JS and
+# _FIND_BY_REASONING_ANYWHERE_JS) so the actual matching logic exists in
+# exactly one place -- found live, via this system's own richer
+# diagnostics: a button/link match on the model's exact-quoted visible
+# text ("Clicking the 'Subscribe to continue reading' button...") worked
+# perfectly, but an email/password INPUT has no such text to quote --
+# nobody says 'click the "you@example.com" field', they say "the email
+# field", referring to the field's ROLE, not its placeholder. Without a
+# second matching strategy for that, every field-focus click on a real
+# run reported zero candidates and zero fallback matches, even though
+# the diagnostic's own `nearestClickable` had already correctly IDENTIFIED
+# the right input every single time -- it just never scored a match.
+_MATCH_JS_HELPERS = """
     const ownText = (el) => (
         el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("placeholder") || ""
     ).trim();
+    // A short, generic list of field-purpose words -- deliberately not
+    // demo_target-specific, so this generalizes to any page's login/
+    // signup/search form, matching the "ambient RPA, no pre-known
+    // selectors" property of everything else in this path.
+    const FIELD_KEYWORDS = [
+        "email", "password", "username", "user", "search", "phone", "name", "login", "subscribe"
+    ];
+    const semanticTokens = (el) => {
+        if (el.tagName !== "INPUT" && el.tagName !== "TEXTAREA") return "";
+        const label = el.id ? document.querySelector('label[for="' + el.id + '"]') : null;
+        const parts = [
+            el.type, el.name, el.id, el.getAttribute("autocomplete"),
+            el.getAttribute("aria-label"), el.getAttribute("placeholder"),
+            label ? label.innerText : "",
+        ];
+        return parts.filter(Boolean).join(" ").toLowerCase();
+    };
+    // Returns a match "score" (0 = no match; higher = more specific/
+    // confident) rather than a boolean, so the caller can prefer the
+    // most specific match among several candidates instead of the first
+    // one found.
+    const matchScore = (el, reasoningLower) => {
+        // 1) Literal visible-text containment -- a button/link whose own
+        //    label the model's reasoning actually quotes.
+        const t = ownText(el).toLowerCase();
+        if (t.length >= 3 && reasoningLower.includes(t)) return t.length;
+        // 2) Semantic field-purpose keyword overlap -- an input referred
+        //    to by ROLE ("the email field"), matched against its own
+        //    type/name/id/autocomplete/label, none of which literal
+        //    text-matching above can ever see.
+        const semantic = semanticTokens(el);
+        if (semantic) {
+            for (const kw of FIELD_KEYWORDS) {
+                if (semantic.includes(kw) && reasoningLower.includes(kw)) return kw.length;
+            }
+        }
+        return 0;
+    };
+"""
+
+_FIND_BY_REASONING_ANYWHERE_JS = (
+    "(reasoning) => {\n"
+    + _MATCH_JS_HELPERS
+    + """
     const reasoningLower = (reasoning || "").toLowerCase();
     if (!reasoningLower) return null;
 
@@ -110,22 +165,20 @@ _FIND_BY_REASONING_ANYWHERE_JS = """
         "button, a, input, textarea, select, [role=button], [role=link], [onclick]"
     );
     let best = null;
-    let bestLen = 0;
+    let bestScore = 0;
     for (const el of candidates) {
         const rect = el.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) continue;
-        const t = ownText(el).toLowerCase();
-        // >= 3 chars, same anchor as the local snap's text-match, so a
-        // stray one-letter overlap can't trigger a click somewhere
-        // unrelated on the page purely by coincidence.
-        if (t.length >= 3 && reasoningLower.includes(t) && t.length > bestLen) {
+        const score = matchScore(el, reasoningLower);
+        if (score > bestScore) {
             best = {cx: rect.left + rect.width / 2, cy: rect.top + rect.height / 2};
-            bestLen = t.length;
+            bestScore = score;
         }
     }
     return best ? [best.cx, best.cy] : null;
 }
 """
+)
 
 
 def _click_anywhere_by_reasoning(page, reasoning: str, run_id: str | None = None) -> bool:
@@ -265,9 +318,24 @@ def execute_action_loop(
                     # rather than asking the identical geometric question
                     # a third time and hoping for a different answer.
                     if _click_anywhere_by_reasoning(page, step.reasoning, run_id):
+                        # Found live: a recovered CLICK alone isn't enough
+                        # when the step that actually stalled was a TYPE --
+                        # focusing the right field is only half the job;
+                        # nothing yet has entered the text the model meant
+                        # to type there. Without this, the recovered click
+                        # looks successful (a real element, correctly
+                        # found) while the field it focused stays empty,
+                        # and a form submitted afterward fails silently
+                        # with no further signal that anything went wrong.
+                        if step.kind == "type":
+                            page.keyboard.type(step.text or "")
+                            recovered_kind, recovered_text = "type", step.text
+                        else:
+                            recovered_kind, recovered_text = "click", None
                         steps.append(
                             ActionStep(
-                                kind="click",
+                                kind=recovered_kind,
+                                text=recovered_text,
                                 reasoning=f"[stall recovery: whole-page text match] {step.reasoning}",
                             )
                         )
@@ -295,6 +363,54 @@ def execute_action_loop(
         created_at=datetime.now(timezone.utc),
         extracted_text=extracted_text,
     )
+
+
+# CSS selectors keyed by field PURPOSE, using only standard HTML5 input
+# semantics (type/name/id/autocomplete) -- not a pre-known, site-specific
+# selector (nothing here names any particular page's markup), the same
+# standard attributes real login/signup forms use for the same reasons
+# password managers, mobile keyboards, and Playwright's own locators do.
+# Still "ambient RPA, no pre-known structure required": this is a fast,
+# deterministic FIRST attempt for the two field types execute_login_and_
+# extract already knows it's looking for (it never needs to guess what a
+# field is FOR the way the general vision loop does), with the existing
+# vision-based location as the fallback for pages that don't use standard
+# input types.
+_FIELD_LOCATOR_SELECTORS = {
+    "email": (
+        'input[type="email"], input[autocomplete*="email" i], input[name*="email" i], '
+        'input[id*="email" i], input[type="text"][autocomplete*="username" i]'
+    ),
+    "password": 'input[type="password"]',
+}
+
+
+def _locate_field_directly(page, purpose: str):
+    """Deterministic, site-agnostic field lookup via standard HTML5
+    semantics -- tried BEFORE the vision model for email/password fields
+    specifically, since execute_login_and_extract already knows
+    unambiguously what it's looking for; there's no reason to risk a
+    vision-grounding miss (or burn a model call) on a question standard
+    HTML already answers. Found live: this exact case (an email/password
+    focus click landing 100+ px off target, every attempt, even after
+    two rounds of vision-grounding fixes) is precisely what this sidesteps
+    entirely rather than mitigates.
+
+    Returns a Playwright Locator if exactly one visible match exists,
+    else None -- never raises: a fake Page in tests with no .locator(), a
+    page using non-standard markup, a detached frame, anything, all just
+    mean this fast path isn't available and the caller falls back to the
+    existing vision-based location."""
+    selector = _FIELD_LOCATOR_SELECTORS.get(purpose)
+    if not selector:
+        return None
+    try:
+        locator = page.locator(selector).first
+        if locator.count() > 0 and locator.is_visible():
+            return locator
+    except Exception:  # noqa: BLE001 - best-effort only, see docstring
+        return None
+    return None
 
 
 def execute_login_and_extract(
@@ -365,9 +481,39 @@ def execute_login_and_extract(
                 step_index += 1
                 return decision
 
-            for field_label, value, redact in (("email or username", email, False), ("password", password, True)):
+            for field_type, field_label, value, redact in (
+                ("email", "email or username", email, False),
+                ("password", "password", password, True),
+            ):
                 if not value:
                     continue
+
+                direct_locator = _locate_field_directly(page, field_type)
+                if direct_locator is not None:
+                    try:
+                        direct_locator.click()
+                        page.keyboard.type(value)
+                        box = direct_locator.bounding_box()
+                        logger.info(
+                            "login_field_filled", run_id=run_id, field=field_label, located_via="direct_selector"
+                        )
+                        steps.append(
+                            ActionStep(
+                                kind="type",
+                                x=round(box["x"] + box["width"] / 2) if box else None,
+                                y=round(box["y"] + box["height"] / 2) if box else None,
+                                text="[REDACTED]" if redact else value,
+                                reasoning=f"entered the provided {field_label} (located via standard HTML input type, not vision)",
+                            )
+                        )
+                        time.sleep(0.2)
+                        continue  # this field is done -- skip the vision-based path below entirely
+                    except Exception as exc:  # noqa: BLE001 - falls through to the vision-based path
+                        logger.warning(
+                            "login_field_direct_locate_failed_falling_back_to_vision",
+                            run_id=run_id, field=field_label, error=str(exc),
+                        )
+
                 click_step = locate(f"Click the {field_label} input field on this login form.")
                 if click_step.kind == "refused" or _looks_like_payment_action(click_step):
                     refused_reason = (
@@ -578,8 +724,10 @@ def extract_visible_text(page) -> str:
 # grab an unrelated control several UI elements away.
 _CLICK_SNAP_RADIUS_PX = 60
 
-_SNAP_TO_CLICKABLE_JS = """
-([x, y, radius, reasoning]) => {
+_SNAP_TO_CLICKABLE_JS = (
+    "([x, y, radius, reasoning]) => {\n"
+    + _MATCH_JS_HELPERS
+    + """
     const isClickable = (el) => {
         if (!el) return false;
         if (["BUTTON", "A", "INPUT", "TEXTAREA", "SELECT", "LABEL"].includes(el.tagName)) return true;
@@ -587,9 +735,6 @@ _SNAP_TO_CLICKABLE_JS = """
         if (role && ["button", "link", "checkbox", "radio", "tab"].includes(role)) return true;
         return window.getComputedStyle(el).cursor === "pointer";
     };
-    const ownText = (el) => (
-        el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("placeholder") || ""
-    ).trim();
     const describe = (el) => el ? (el.tagName + (el.id ? "#" + el.id : "") + (ownText(el) ? " " + JSON.stringify(ownText(el).slice(0, 40)) : "")) : null;
 
     const direct = document.elementFromPoint(x, y);
@@ -613,22 +758,20 @@ _SNAP_TO_CLICKABLE_JS = """
 
     let chosen = null;
     if (inRadius.length > 0) {
-        // Prefer whichever nearby candidate's own visible text/label the
-        // model's reasoning actually quotes -- the model very often
-        // names exactly what it means to click (e.g. "Clicking the
-        // 'Subscribe to continue reading' button"). Raw pixel proximity
-        // alone can't disambiguate two clickable elements only a few
-        // pixels apart (e.g. an input immediately above a submit
-        // button) -- this can, since it uses a signal the model already
-        // gave us, not just geometry.
+        // Prefer whichever nearby candidate scores highest against the
+        // model's reasoning (literal text match for a labeled button/
+        // link, semantic field-purpose match for an input) over raw
+        // pixel proximity alone -- see _MATCH_JS_HELPERS above for why
+        // both matter. Falls back to nearest-by-distance only when
+        // nothing in radius matches either way.
         const reasoningLower = (reasoning || "").toLowerCase();
         if (reasoningLower) {
-            let bestLen = 0;
+            let bestScore = 0;
             for (const c of inRadius) {
-                const t = ownText(c.el).toLowerCase();
-                if (t.length >= 3 && reasoningLower.includes(t) && t.length > bestLen) {
+                const score = matchScore(c.el, reasoningLower);
+                if (score > bestScore) {
                     chosen = c;
-                    bestLen = t.length;
+                    bestScore = score;
                 }
             }
         }
@@ -647,6 +790,7 @@ _SNAP_TO_CLICKABLE_JS = """
     };
 }
 """
+)
 
 
 def _snap_to_clickable(

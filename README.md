@@ -327,14 +327,19 @@ lightly applied here.
 
   1. **Local geometric snap** (`_snap_to_clickable`) — if the model's
      exact coordinate isn't already on a clickable element, search a
-     small radius (60px) for the nearest one and click that instead,
-     using the model's own `reasoning` text to pick between two nearby
-     candidates (e.g. an input sitting a few pixels above a submit
-     button) when raw proximity alone can't disambiguate them. Handles a
-     modest miss. Every outcome is logged with a full diagnostic — what's
-     directly under the coordinate, how many candidates are in radius,
-     and the identity/distance of the single nearest clickable element on
-     the whole page even when it's outside that radius — so a live run is
+     small radius (60px) for the nearest one and click that instead.
+     Candidates are scored against the model's own `reasoning` text two
+     ways: literal visible-text containment (a button/link whose label
+     the reasoning quotes verbatim) and semantic field-purpose matching
+     (an input's `type`/`name`/`id`/`autocomplete`/associated `<label>`
+     against a short, generic keyword list — "email", "password",
+     "username", etc.) — the second is what lets a field referred to by
+     *role* ("the email field") match an input that has no visible text
+     to quote in the first place, unlike a button. Handles a modest miss.
+     Every outcome is logged with a full diagnostic — what's directly
+     under the coordinate, how many candidates are in radius, and the
+     identity/distance of the single nearest clickable element on the
+     whole page even when it's outside that radius — so a live run is
      self-diagnosing without a screenshot ever needing to be handed back
      and forth to debug it.
   2. **Stall detection** (`_page_signature`) — a SHA-256 fingerprint of
@@ -345,26 +350,48 @@ lightly applied here.
      looking reasoning.
   3. **Whole-page semantic fallback** (`_click_anywhere_by_reasoning`) —
      triggered only once a stall is proven. Searches the *entire* page,
-     no radius, for a clickable element whose own visible text the
-     model's reasoning names, and clicks it directly. This is what a
-     bounded local radius structurally cannot do: rescue a coordinate
-     estimate that's off by hundreds of pixels, by trusting what the
-     model already said it meant to click over where it guessed that was.
-     Still zero pre-known selectors — this generalizes to any page, the
-     same "ambient RPA" property as everything else in this path.
+     no radius, using the same two-way scoring as the local snap. This is
+     what a bounded local radius structurally cannot do: rescue a
+     coordinate estimate that's off by hundreds of pixels — found live,
+     exactly this magnitude, on a real run — by trusting what the model
+     already said it meant to click over where it guessed that was. If
+     the *stalled* step was a `type` (not a click), the recovery also
+     retypes the original text once the right field is focused — a
+     recovered click alone finds the field but leaves it empty, which
+     silently fails a form submitted afterward with no further signal
+     anything went wrong; caught live, on a real run, before it shipped
+     as a fix that only looked complete. Still zero pre-known selectors —
+     this generalizes to any page, the same "ambient RPA" property as
+     everything else in this path.
   4. **Self-correction hint** — if even the whole-page fallback finds
      nothing, the next model call is told explicitly, in the prompt, that
      its last estimate had no effect, rather than silently re-asking the
      identical question and hoping for a different answer.
 
   Layers 2–4 apply to the general action loop and to the login flow's
-  submit click (the one place `execute_login_and_extract` clicks blind).
-  Verified end to end against a real headless Chromium and a byte-for-
-  byte replica of `demo_target`'s failing layout: a deliberately-planted
-  coordinate error that the local snap alone could not resolve (candidate
-  count zero within radius) *is* resolved by the whole-page fallback,
-  with the real click landing on the real button and the page actually
-  unlocking — not just asserted in a mocked unit test.
+  submit click (the one blind click `execute_login_and_extract` still
+  makes). That function's *field* clicks (email/password) skip vision
+  grounding altogether: `_locate_field_directly` tries a deterministic
+  Playwright locator against standard HTML5 input semantics
+  (`input[type="email"]`, `input[type="password"]`, etc.) FIRST, since
+  the function already knows unambiguously what it's looking for — no
+  reason to risk a vision-coordinate guess (or spend a model call) on a
+  question standard HTML already answers. Falls back to the vision-based
+  path only for a page that doesn't use standard input types.
+
+  All of this was proven end to end against a real headless Chromium and
+  demo_target's actual markup, driven by the live diagnostics from a real
+  run rather than a synthetic reproduction: `nearest_clickable` correctly
+  identified the right input every single time but never scored a match
+  (the literal-text-only gap #1 above closes); a correctly-clicked real
+  button still left the gate locked because the field it was supposed to
+  fill was never actually typed into (the type-recovery gap in #3
+  closes); and the login flow now bypasses vision grounding for its
+  fields entirely. Each fix was verified by actually running it — logging
+  in, filling the real field, submitting the real form, and checking the
+  *extracted content* is genuinely the unlocked version (a phrase that
+  only exists past the gate), not just that a click executed without
+  raising.
 
 Reports its outcome directly onto `RunState.answer`/`answer_text` once the
 DAG finishes (`executor.py`'s `_compose_action_answer`) — there's no LLM

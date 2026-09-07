@@ -743,6 +743,210 @@ def test_execute_login_and_extract_with_email_only_skips_the_password_field(tmp_
     assert page.keyboard.typed == ["judge@example.com"]
 
 
+class _FakeLocator:
+    """Stands in for a real Playwright Locator -- just enough surface
+    for _locate_field_directly and its caller: .first, .count(),
+    .is_visible(), .click(), .bounding_box()."""
+
+    def __init__(self, box: dict | None, click_log: list):
+        self._box = box
+        self._click_log = click_log
+
+    @property
+    def first(self):
+        return self
+
+    def count(self):
+        return 1 if self._box else 0
+
+    def is_visible(self):
+        return self._box is not None
+
+    def click(self):
+        self._click_log.append(self._box)
+
+    def bounding_box(self):
+        return self._box
+
+
+class _FakeLocatorPage(_FakePage):
+    """A _FakePage that also implements .locator(selector), returning a
+    _FakeLocator with the configured bounding box for whichever key
+    (a substring like "email" or "password") appears in the selector --
+    standing in for a real page that does (or doesn't) have a standard
+    input[type=email]/input[type=password] element."""
+
+    def __init__(self, boxes_by_field: dict[str, dict]):
+        super().__init__()
+        self._boxes = boxes_by_field
+        self.locator_calls: list[str] = []
+        self.locator_clicks: list[dict | None] = []
+
+    def locator(self, selector):
+        self.locator_calls.append(selector)
+        for key, box in self._boxes.items():
+            if key in selector:
+                return _FakeLocator(box, self.locator_clicks)
+        return _FakeLocator(None, self.locator_clicks)
+
+
+# --- _locate_field_directly ---------------------------------------------
+
+
+def test_locate_field_directly_finds_a_standard_email_input():
+    page = _FakeLocatorPage({"email": {"x": 100.0, "y": 200.0, "width": 260.0, "height": 36.0}})
+
+    locator = action_executor._locate_field_directly(page, "email")
+
+    assert locator is not None
+    assert locator.bounding_box() == {"x": 100.0, "y": 200.0, "width": 260.0, "height": 36.0}
+
+
+def test_locate_field_directly_returns_none_when_nothing_matches():
+    page = _FakeLocatorPage({})
+
+    assert action_executor._locate_field_directly(page, "email") is None
+
+
+def test_locate_field_directly_returns_none_for_an_unrecognized_purpose():
+    page = _FakeLocatorPage({"email": {"x": 0.0, "y": 0.0, "width": 10.0, "height": 10.0}})
+
+    assert action_executor._locate_field_directly(page, "otp_code") is None
+
+
+def test_locate_field_directly_survives_locator_raising():
+    class _BoomLocatorPage(_FakePage):
+        def locator(self, selector):
+            raise RuntimeError("no such method on this page")
+
+    assert action_executor._locate_field_directly(_BoomLocatorPage(), "email") is None
+
+
+def test_locate_field_directly_survives_a_page_with_no_locator_method_at_all():
+    """A bare _FakePage (used throughout the rest of this file's
+    execute_login_and_extract tests) has no .locator() at all -- this is
+    what lets ALL of those tests keep exercising the vision-based path
+    unchanged: the direct-selector attempt fails open and defers to it,
+    rather than raising AttributeError."""
+    assert action_executor._locate_field_directly(_FakePage(), "email") is None
+
+
+# --- execute_login_and_extract: direct-selector field lookup ------------
+
+
+def test_execute_login_and_extract_uses_the_direct_selector_and_skips_vision_for_fields(tmp_path, monkeypatch):
+    """The whole point: when the page uses standard input[type=email]/
+    input[type=password] markup, execute_login_and_extract must not risk
+    a vision-grounding miss (or spend a model call) locating them at
+    all -- found live, this exact case (an email/password focus click
+    landing 100+ px off target on demo_target's real markup, every
+    attempt, even with reasoning-aware snapping and a whole-page
+    fallback) is precisely what this sidesteps."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakeLocatorPage(
+        {
+            "email": {"x": 100.0, "y": 200.0, "width": 260.0, "height": 36.0},
+            "password": {"x": 100.0, "y": 250.0, "width": 260.0, "height": 36.0},
+        }
+    )
+    _patch_browser(monkeypatch, page)
+    decide_calls = []
+    queue = iter(
+        [
+            ActionStep(kind="click", x=200, y=400, reasoning="the login button"),
+            ActionStep(kind="done", reasoning="member content is now visible"),
+        ]
+    )
+
+    def fake_decide(screenshot_path, intent, history, *, run_id, node_id, hint=None):
+        decide_calls.append(intent)
+        return next(queue)
+
+    monkeypatch.setattr(action_executor, "decide_next_action", fake_decide)
+
+    workflow = action_executor.execute_login_and_extract(
+        email="judge@example.com", password="hunter2", start_url="https://example.test", run_id="r-direct"
+    )
+
+    assert workflow.success is True
+    assert page.keyboard.typed == ["judge@example.com", "hunter2"]
+    # only the submit-button and login-confirmation prompts ever reached
+    # the vision model -- never a per-field "click the ... field" prompt
+    assert not any("input field" in intent for intent in decide_calls)
+    assert page.locator_clicks == [
+        {"x": 100.0, "y": 200.0, "width": 260.0, "height": 36.0},
+        {"x": 100.0, "y": 250.0, "width": 260.0, "height": 36.0},
+    ]
+    type_steps = [s for s in workflow.steps if s.kind == "type"]
+    assert any("not vision" in s.reasoning for s in type_steps)
+    assert any(s.text == "[REDACTED]" for s in type_steps)
+
+
+def test_execute_login_and_extract_falls_back_to_vision_when_no_standard_input_exists(tmp_path, monkeypatch):
+    """A page that doesn't use standard input types (unusual, but real)
+    must still work via the existing vision-based location -- the direct
+    selector is a fast path, never a hard requirement."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakeLocatorPage({})  # no standard inputs found
+    _patch_browser(monkeypatch, page)
+    _steps_queue(
+        monkeypatch,
+        [
+            ActionStep(kind="click", x=200, y=200, reasoning="the email field"),
+            ActionStep(kind="click", x=200, y=400, reasoning="the login button"),
+            ActionStep(kind="done", reasoning="member content is now visible"),
+        ],
+    )
+
+    workflow = action_executor.execute_login_and_extract(
+        email="judge@example.com", password=None, start_url="https://example.test", run_id="r-fallback"
+    )
+
+    assert workflow.success is True
+    assert page.keyboard.typed == ["judge@example.com"]
+
+
+def test_execute_login_and_extract_falls_back_to_vision_when_the_direct_click_raises(tmp_path, monkeypatch):
+    """A locator that's found but whose .click() itself fails (element
+    detached, obscured, anything) must fall back to vision rather than
+    losing the field entirely."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+
+    class _BoomOnClickLocator(_FakeLocator):
+        def click(self):
+            raise RuntimeError("element is not attached to the DOM")
+
+    class _BoomOnClickPage(_FakeLocatorPage):
+        def locator(self, selector):
+            if "email" in selector:
+                return _BoomOnClickLocator({"x": 100.0, "y": 200.0, "width": 260.0, "height": 36.0}, [])
+            return super().locator(selector)
+
+    page = _BoomOnClickPage({})
+    _patch_browser(monkeypatch, page)
+    _steps_queue(
+        monkeypatch,
+        [
+            ActionStep(kind="click", x=200, y=200, reasoning="the email field"),
+            ActionStep(kind="click", x=200, y=400, reasoning="the login button"),
+            ActionStep(kind="done", reasoning="member content is now visible"),
+        ],
+    )
+
+    workflow = action_executor.execute_login_and_extract(
+        email="judge@example.com", password=None, start_url="https://example.test", run_id="r-click-fail"
+    )
+
+    assert workflow.success is True
+    assert page.keyboard.typed == ["judge@example.com"]
+
+
 def test_execute_login_and_extract_refuses_on_a_payment_shaped_submit_button(tmp_path, monkeypatch):
     from agents.common.config import settings
 
@@ -1075,6 +1279,65 @@ def test_loop_recovers_from_a_proven_stall_via_the_whole_page_fallback(tmp_path,
     assert fallback_calls == ["click subscribe"]
     assert workflow.success is True
     assert any("stall recovery" in s.reasoning for s in workflow.steps)
+
+
+def test_loop_stall_recovery_retypes_the_text_when_the_stalled_step_was_a_type(tmp_path, monkeypatch):
+    """Found live: recovering a stalled TYPE step by only re-clicking the
+    real target (via the whole-page fallback) focuses the right field
+    but never enters the text the model meant to type there -- a
+    genuinely correct recovered click still leaves the field empty. The
+    recovery must also retype the original text once the right element
+    is focused, or a form submitted afterward fails silently with no
+    further signal anything went wrong."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakeContentPage(content_sequence=["A", "A", "A", "B"])
+    _patch_browser(monkeypatch, page)
+    _steps_queue(
+        monkeypatch,
+        [
+            ActionStep(kind="type", x=500, y=500, text="judge@example.com", reasoning="enter the email address"),
+            ActionStep(kind="type", x=500, y=500, text="judge@example.com", reasoning="enter the email address"),
+            ActionStep(kind="done", reasoning="done"),
+        ],
+    )
+    monkeypatch.setattr(action_executor, "_click_anywhere_by_reasoning", lambda page_arg, reasoning, run_id=None: True)
+
+    workflow = action_executor.execute_action_loop("subscribe", "https://example.test", run_id="r-stall-type")
+
+    # the real keystrokes actually happened, not just a click
+    assert "judge@example.com" in page.keyboard.typed
+    recovered = [s for s in workflow.steps if "stall recovery" in s.reasoning]
+    assert len(recovered) == 1
+    assert recovered[0].kind == "type"
+    assert recovered[0].text == "judge@example.com"
+
+
+def test_loop_stall_recovery_does_not_type_when_the_stalled_step_was_a_click(tmp_path, monkeypatch):
+    """The click case (a submit button, not a field) must not gain a
+    spurious keystroke it never had -- only a recovered TYPE retypes."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakeContentPage(content_sequence=["A", "A", "A", "B"])
+    _patch_browser(monkeypatch, page)
+    _steps_queue(
+        monkeypatch,
+        [
+            ActionStep(kind="click", x=500, y=500, reasoning="click subscribe"),
+            ActionStep(kind="click", x=500, y=500, reasoning="click subscribe"),
+            ActionStep(kind="done", reasoning="done"),
+        ],
+    )
+    monkeypatch.setattr(action_executor, "_click_anywhere_by_reasoning", lambda page_arg, reasoning, run_id=None: True)
+
+    workflow = action_executor.execute_action_loop("subscribe", "https://example.test", run_id="r-stall-click")
+
+    assert page.keyboard.typed == []
+    recovered = [s for s in workflow.steps if "stall recovery" in s.reasoning]
+    assert recovered[0].kind == "click"
+    assert recovered[0].text is None
 
 
 def test_loop_escalates_to_a_correction_hint_when_the_fallback_also_finds_nothing(tmp_path, monkeypatch):
