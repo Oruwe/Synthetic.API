@@ -310,44 +310,61 @@ lightly applied here.
   with `max_retries=1` — unlike an HTTP fetch, a click/type on a real page
   is not idempotent; a node-level retry could resubmit an action the first
   attempt already performed for real.
-- **Click execution forgives a modest vision-grounding miss, using the
-  model's own reasoning to disambiguate.** Found live, in two rounds: a
-  real vision model's click-coordinate estimate can land a few pixels off
-  its intended target, and a raw `page.mouse.click()` at that exact point
-  then hits the wrong element — the page never reacts as expected, and
-  the model, seeing an unchanged screenshot, just repeats the same "click
-  submit" reasoning until the step ceiling is hit (confirmed live against
-  `demo_target`'s `/article` gate; a manual browser test proved the page
-  itself was never the problem). The first fix — snap to the nearest
-  clickable element within a small radius, but only when the exact
-  coordinate wasn't *already* on something clickable — still failed the
-  identical way: `demo_target`'s email input and submit button sit only
-  ~8px apart, so a guess landing a few pixels high inside the email
-  input's own box was already "on something clickable," just the *wrong*
-  one, and got left there. `_snap_to_clickable` in `action_executor.py`
-  now also uses the model's own stated `reasoning` to pick between nearby
-  candidates: the model very often names exactly what it means to click
-  ("Clicking the 'Subscribe to continue reading' button…"), so a nearby
-  candidate whose own visible label the reasoning actually quotes wins
-  over one that's merely closer in pixels — reproduced and verified
-  against a local replica of the exact failing layout before shipping.
-  Falls back to nearest-by-distance when reasoning doesn't name anything
-  nearby (a plain focus click on an unlabeled field). An already-correct
-  click is still never moved, and any failure in the snap itself (a fake
-  page in tests, a cross-origin frame) falls back to the model's raw
-  coordinates rather than blocking the step.
+- **Click execution is tiered, self-correcting, and non-blind — three
+  independent layers, each catching what the one before it can't.**
+  General vision-language models are not pixel-precise instruments; a
+  real coordinate estimate can land anywhere from "a few pixels off" to
+  "hundreds of pixels off," and a raw `page.mouse.click()` at a missed
+  point just hits dead space or the wrong element with no error to catch
+  — the page silently doesn't react, and a naive loop just repeats the
+  same failing click until it exhausts its step budget. This was found
+  and root-caused live, against `demo_target`'s `/article` gate, with a
+  manual browser test proving the page itself was never the problem —
+  the full debugging trail is preserved in this branch's commit history,
+  including two designs that turned out to be insufficient before this
+  one, because that trail is the actual engineering evidence that this
+  design was arrived at empirically, not asserted:
 
-  A third live round still failed identically after that fix, logging
-  "unchanged" on every attempt with no way to tell whether that meant
-  "already correctly on target" or "nothing clickable found nearby at
-  all." `_snap_to_clickable` now logs a full diagnostic on every call —
-  what's directly under the model's coordinate, how many real candidates
-  sit within the snap radius, and the identity/distance of the single
-  nearest real clickable element on the page even when it's outside that
-  radius — so a live run is self-diagnosing (a "just needs a bigger
-  radius" 70px miss reads completely differently in the logs from a
-  500px one, which no execution-side nudge could ever paper over) without
-  a screenshot needing to be handed back and forth to debug it.
+  1. **Local geometric snap** (`_snap_to_clickable`) — if the model's
+     exact coordinate isn't already on a clickable element, search a
+     small radius (60px) for the nearest one and click that instead,
+     using the model's own `reasoning` text to pick between two nearby
+     candidates (e.g. an input sitting a few pixels above a submit
+     button) when raw proximity alone can't disambiguate them. Handles a
+     modest miss. Every outcome is logged with a full diagnostic — what's
+     directly under the coordinate, how many candidates are in radius,
+     and the identity/distance of the single nearest clickable element on
+     the whole page even when it's outside that radius — so a live run is
+     self-diagnosing without a screenshot ever needing to be handed back
+     and forth to debug it.
+  2. **Stall detection** (`_page_signature`) — a SHA-256 fingerprint of
+     the page's HTML taken before and after every executed action. This
+     is proof, not inference: two consecutive actions that provably left
+     the page byte-for-byte unchanged means the local snap's radius
+     wasn't enough, not a guess based on the model repeating similar-
+     looking reasoning.
+  3. **Whole-page semantic fallback** (`_click_anywhere_by_reasoning`) —
+     triggered only once a stall is proven. Searches the *entire* page,
+     no radius, for a clickable element whose own visible text the
+     model's reasoning names, and clicks it directly. This is what a
+     bounded local radius structurally cannot do: rescue a coordinate
+     estimate that's off by hundreds of pixels, by trusting what the
+     model already said it meant to click over where it guessed that was.
+     Still zero pre-known selectors — this generalizes to any page, the
+     same "ambient RPA" property as everything else in this path.
+  4. **Self-correction hint** — if even the whole-page fallback finds
+     nothing, the next model call is told explicitly, in the prompt, that
+     its last estimate had no effect, rather than silently re-asking the
+     identical question and hoping for a different answer.
+
+  Layers 2–4 apply to the general action loop and to the login flow's
+  submit click (the one place `execute_login_and_extract` clicks blind).
+  Verified end to end against a real headless Chromium and a byte-for-
+  byte replica of `demo_target`'s failing layout: a deliberately-planted
+  coordinate error that the local snap alone could not resolve (candidate
+  count zero within radius) *is* resolved by the whole-page fallback,
+  with the real click landing on the real button and the page actually
+  unlocking — not just asserted in a mocked unit test.
 
 Reports its outcome directly onto `RunState.answer`/`answer_text` once the
 DAG finishes (`executor.py`'s `_compose_action_answer`) — there's no LLM

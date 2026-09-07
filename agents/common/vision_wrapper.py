@@ -211,7 +211,7 @@ def _lenient_extract_action_fields(raw: str) -> dict:
 
 
 def decide_next_action(
-    screenshot_path: str, intent: str, history: list[ActionStep], *, run_id: str, node_id: str
+    screenshot_path: str, intent: str, history: list[ActionStep], *, run_id: str, node_id: str, hint: str | None = None
 ) -> ActionStep:
     """Asks the vision model for the single next action toward `intent`,
     given the current screenshot and what's already been tried. Never
@@ -219,7 +219,17 @@ def decide_next_action(
     other failure all come back as a "stuck" ActionStep so the caller's
     loop (action_executor.py) stops cleanly and reports it, instead of
     crashing the whole action run or -- worse -- executing an action built
-    from a response nobody validated."""
+    from a response nobody validated.
+
+    `hint`, when given, is appended as an explicit correction note --
+    action_executor.py's stall detector supplies one after an executed
+    action provably didn't change the page (a same-page-signature check,
+    not a guess) and its own whole-page text-match fallback also found
+    nothing to click. This is a standard, well-established self-correction
+    technique for vision-grounding agents: telling the model directly
+    that its last spatial estimate didn't land, rather than silently
+    re-asking the identical question and hoping for a different answer.
+    """
     history_lines = [
         f"{i + 1}. {s.kind}"
         + (f" at ({s.x},{s.y})" if s.x is not None else "")
@@ -228,6 +238,8 @@ def decide_next_action(
     ]
     history_text = "\n".join(history_lines) if history_lines else "(none yet)"
     prompt = f"GOAL: {intent}\n\nActions taken so far:\n{history_text}"
+    if hint:
+        prompt += f"\n\nIMPORTANT: {hint}"
 
     try:
         raw = _vision_agent.decide_action(screenshot_path, prompt, run_id=run_id, node_id=node_id)

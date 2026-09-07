@@ -20,6 +20,7 @@ Real-world safety, non-negotiable, not left to the model's own compliance:
   just described after the fact with nothing to check it against.
 """
 
+import hashlib
 import re
 import time
 from datetime import datetime, timezone
@@ -49,6 +50,113 @@ _PAYMENT_KEYWORDS = re.compile(
 def _looks_like_payment_action(step: ActionStep) -> bool:
     haystack = " ".join(filter(None, [step.reasoning, step.text]))
     return bool(_PAYMENT_KEYWORDS.search(haystack))
+
+
+# --- Stall detection + tier-2 (whole-page, geometry-free) fallback grounding ---
+#
+# _snap_to_clickable (below) only ever nudges a click within a small local
+# radius -- it can rescue "the model's estimate was a few pixels off," but
+# it CANNOT rescue "the model's spatial estimate for this control is off
+# by hundreds of pixels," which is a real, observed failure mode of a
+# general (non-specialized) vision model doing pixel-precise UI grounding.
+# No radius is the right radius for that: too small and it doesn't help,
+# too large and it starts grabbing unrelated controls by pure geometric
+# luck. The fix isn't a bigger number, it's a different STRATEGY, used
+# only once the loop has PROOF (not a guess) that its last action had no
+# effect: reground by matching the model's own reasoning text against
+# every real clickable element on the page, not just nearby ones. This
+# reduces "estimate exact pixels" (hard for a general VLM) to "does this
+# element's own label appear in what the model already said it meant to
+# click" (a plain substring check against real DOM text) -- using a
+# signal the model already produced, not a new model call, and without
+# ever depending on a pre-known selector (still true "ambient RPA": this
+# generalizes to any page, not just demo_target).
+
+
+def _page_signature(page) -> str | None:
+    """A cheap fingerprint of the page's current visible HTML -- lets the
+    loop PROVE an executed action had no effect (same signature before
+    and after) instead of inferring it from the model repeating similar
+    reasoning, which is a weaker, later, more expensive signal to notice.
+    Best-effort: returns None on any failure (a fake Page in tests with
+    no .content(), a detached frame mid-navigation, anything), and a None
+    signature is never treated as equal to another None -- so stall
+    detection is simply skipped for that step rather than ever false-
+    triggering on two failures to observe, matching this module's
+    fail-open discipline everywhere else."""
+    try:
+        html = page.content()
+    except Exception:
+        return None
+    return hashlib.sha256(html.encode("utf-8", errors="ignore")).hexdigest()
+
+
+_STALL_CORRECTION_HINT = (
+    "Your last action did not visibly change the page -- it likely missed its target. "
+    "Look very carefully at the exact pixel boundaries of the element before choosing "
+    "coordinates again; consider that your previous estimate may have been off by a "
+    "significant margin, not just a few pixels."
+)
+
+_FIND_BY_REASONING_ANYWHERE_JS = """
+(reasoning) => {
+    const ownText = (el) => (
+        el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("placeholder") || ""
+    ).trim();
+    const reasoningLower = (reasoning || "").toLowerCase();
+    if (!reasoningLower) return null;
+
+    const candidates = document.querySelectorAll(
+        "button, a, input, textarea, select, [role=button], [role=link], [onclick]"
+    );
+    let best = null;
+    let bestLen = 0;
+    for (const el of candidates) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        const t = ownText(el).toLowerCase();
+        // >= 3 chars, same anchor as the local snap's text-match, so a
+        // stray one-letter overlap can't trigger a click somewhere
+        // unrelated on the page purely by coincidence.
+        if (t.length >= 3 && reasoningLower.includes(t) && t.length > bestLen) {
+            best = {cx: rect.left + rect.width / 2, cy: rect.top + rect.height / 2};
+            bestLen = t.length;
+        }
+    }
+    return best ? [best.cx, best.cy] : null;
+}
+"""
+
+
+def _click_anywhere_by_reasoning(page, reasoning: str, run_id: str | None = None) -> bool:
+    """Tier-2 fallback: searches the ENTIRE page (no radius) for a real
+    clickable element whose own visible text/label the model's reasoning
+    names, and clicks it directly if found. Only ever invoked after the
+    stall detector has PROVEN (via _page_signature, not a heuristic) that
+    the model's own pixel-coordinate attempt had no effect -- this is a
+    last-resort re-grounding, not a replacement for normal execution.
+    Returns True if a click was executed, False if no confident text
+    match exists anywhere on the page (the caller falls back to a
+    corrective hint for the model instead). Never raises: a page that
+    can't run .evaluate at all just means this fallback isn't available,
+    same fail-open posture as _snap_to_clickable."""
+    try:
+        target = page.evaluate(_FIND_BY_REASONING_ANYWHERE_JS, reasoning)
+    except Exception as exc:  # noqa: BLE001 - best-effort only, see docstring
+        logger.warning("click_fallback_evaluate_failed", run_id=run_id, error=str(exc))
+        return False
+    if not target or len(target) != 2:
+        logger.info("click_fallback_no_match", run_id=run_id, reasoning=reasoning)
+        return False
+
+    x, y = float(target[0]), float(target[1])
+    page.mouse.click(x, y)
+    try:
+        page.wait_for_load_state("load", timeout=5000)
+    except Exception:  # noqa: BLE001 - not every click navigates
+        pass
+    logger.warning("click_fallback_executed", run_id=run_id, x=round(x), y=round(y), reasoning=reasoning)
+    return True
 
 
 def execute_action_loop(
@@ -93,11 +201,22 @@ def execute_action_loop(
             page.set_default_timeout(PAGE_DEFAULT_TIMEOUT_MS)
             page.goto(start_url, wait_until="load")
 
+            # Stall detection: page_signature is PROOF an executed action had
+            # no effect (not an inference from repeated-looking reasoning),
+            # and hint escalates what the model is told once that's
+            # confirmed twice in a row -- see the module-level comment above
+            # _page_signature for the full reasoning.
+            prev_signature = _page_signature(page)
+            stall_count = 0
+            hint: str | None = None
+
             for i in range(max_steps):
                 screenshot_path = str(out_dir / f"step-{i:02d}.png")
                 page.screenshot(path=screenshot_path, full_page=False)
 
-                step = decide_next_action(screenshot_path, intent, steps, run_id=run_id, node_id=f"action-{i}")
+                step = decide_next_action(
+                    screenshot_path, intent, steps, run_id=run_id, node_id=f"action-{i}", hint=hint
+                )
 
                 if step.kind not in ("done", "refused", "stuck") and _looks_like_payment_action(step):
                     logger.warning("action_refused_payment_guard", run_id=run_id, reasoning=step.reasoning)
@@ -126,6 +245,39 @@ def execute_action_loop(
 
                 _execute_step(page, step, run_id)
                 time.sleep(0.3)  # let the page settle before the next screenshot
+
+                new_signature = _page_signature(page)
+                unchanged = (
+                    prev_signature is not None and new_signature is not None and new_signature == prev_signature
+                )
+                if unchanged:
+                    stall_count += 1
+                    logger.warning("action_step_no_visible_effect", run_id=run_id, step=i, stall_count=stall_count)
+                else:
+                    stall_count = 0
+                    hint = None
+
+                if stall_count >= 2:
+                    # Two proven-no-effect actions in a row: the model's
+                    # pixel estimate isn't just a little off, it's not
+                    # working at all. Re-ground against the real DOM using
+                    # what the model already told us it meant to click,
+                    # rather than asking the identical geometric question
+                    # a third time and hoping for a different answer.
+                    if _click_anywhere_by_reasoning(page, step.reasoning, run_id):
+                        steps.append(
+                            ActionStep(
+                                kind="click",
+                                reasoning=f"[stall recovery: whole-page text match] {step.reasoning}",
+                            )
+                        )
+                        stall_count = 0
+                        hint = None
+                        new_signature = _page_signature(page)
+                    else:
+                        hint = _STALL_CORRECTION_HINT
+
+                prev_signature = new_signature
             else:
                 logger.warning("action_loop_exhausted_max_steps", run_id=run_id, max_steps=max_steps)
 
@@ -264,9 +416,31 @@ def execute_login_and_extract(
                         ActionStep(kind="refused", reasoning=refused_reason, screenshot_path=submit_step.screenshot_path)
                     )
                 elif submit_step.kind == "click" and submit_step.x is not None and submit_step.y is not None:
+                    pre_submit_signature = _page_signature(page)
                     _execute_step(page, submit_step, run_id)
                     steps.append(submit_step)
                     time.sleep(0.5)  # let the page navigate/settle after submit
+
+                    # One geometry-independent retry if the submit click
+                    # provably had no effect -- same stall-recovery logic
+                    # as execute_action_loop's main loop, applied to the
+                    # one highest-risk click in this flow.
+                    post_submit_signature = _page_signature(page)
+                    if (
+                        pre_submit_signature is not None
+                        and post_submit_signature is not None
+                        and post_submit_signature == pre_submit_signature
+                    ):
+                        logger.warning("login_submit_no_visible_effect", run_id=run_id)
+                        if _click_anywhere_by_reasoning(page, submit_step.reasoning, run_id):
+                            steps.append(
+                                ActionStep(
+                                    kind="click",
+                                    reasoning=f"[stall recovery: whole-page text match] {submit_step.reasoning}",
+                                )
+                            )
+                            time.sleep(0.5)
+
                     confirm_step = locate(
                         "Has the login succeeded (you now see account/member-only content), or does this still "
                         'look like a login form or an error message? Respond kind="done" if it succeeded, '

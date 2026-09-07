@@ -62,6 +62,23 @@ class _FakePage:
         self.wait_for_load_state_calls.append(state)
 
 
+class _FakeContentPage(_FakePage):
+    """A _FakePage that also implements .content(), returning successive
+    values from `content_sequence` (repeating the last one once
+    exhausted) -- lets a test control exactly what _page_signature sees
+    on each call, to deterministically drive the stall detector."""
+
+    def __init__(self, content_sequence: list[str]):
+        super().__init__()
+        self._content_sequence = list(content_sequence)
+        self._content_index = 0
+
+    def content(self):
+        i = min(self._content_index, len(self._content_sequence) - 1)
+        self._content_index += 1
+        return self._content_sequence[i]
+
+
 class _FakeBrowser:
     def __init__(self, page: _FakePage):
         self._page = page
@@ -80,10 +97,10 @@ def _patch_browser(monkeypatch, page: _FakePage):
 
 def _steps_queue(monkeypatch, steps: list[ActionStep]):
     """Returns decisions from `steps` in order, one per call, regardless
-    of the actual screenshot/intent/history arguments passed in."""
+    of the actual screenshot/intent/history/hint arguments passed in."""
     queue = iter(steps)
 
-    def fake_decide(screenshot_path, intent, history, *, run_id, node_id):
+    def fake_decide(screenshot_path, intent, history, *, run_id, node_id, hint=None):
         return next(queue)
 
     monkeypatch.setattr(action_executor, "decide_next_action", fake_decide)
@@ -322,7 +339,7 @@ def test_loop_respects_the_max_steps_ceiling(tmp_path, monkeypatch):
     page = _FakePage()
     _patch_browser(monkeypatch, page)
 
-    def always_scroll(screenshot_path, intent, history, *, run_id, node_id):
+    def always_scroll(screenshot_path, intent, history, *, run_id, node_id, hint=None):
         return ActionStep(kind="scroll", reasoning="keep looking")
 
     monkeypatch.setattr(action_executor, "decide_next_action", always_scroll)
@@ -688,7 +705,7 @@ def test_execute_login_and_extract_never_sends_the_password_to_the_vision_model(
         ]
     )
 
-    def fake_decide(screenshot_path, intent, history, *, run_id, node_id):
+    def fake_decide(screenshot_path, intent, history, *, run_id, node_id, hint=None):
         captured_intents.append(intent)
         for h in history:
             captured_intents.append(str(h.text))
@@ -949,3 +966,210 @@ def test_execute_step_type_focuses_the_field_before_typing(tmp_path, monkeypatch
 
     assert page.mouse.clicks == [(640.0, 400.0)]
     assert page.keyboard.typed == ["hello"]
+
+
+# --- _page_signature ---------------------------------------------------
+
+
+def test_page_signature_reflects_content_changes():
+    page = _FakeContentPage(content_sequence=["<html>A</html>", "<html>B</html>"])
+    sig_a = action_executor._page_signature(page)
+    sig_b = action_executor._page_signature(page)
+    assert sig_a != sig_b
+
+
+def test_page_signature_is_stable_for_identical_content():
+    page = _FakeContentPage(content_sequence=["<html>A</html>"])
+    sig1 = action_executor._page_signature(page)
+    sig2 = action_executor._page_signature(page)
+    assert sig1 == sig2
+
+
+def test_page_signature_returns_none_on_failure():
+    class _BrokenContentPage(_FakePage):
+        def content(self):
+            raise RuntimeError("page crashed")
+
+    assert action_executor._page_signature(_BrokenContentPage()) is None
+
+
+# --- _click_anywhere_by_reasoning (tier-2 fallback grounding) ----------
+
+
+class _FakeEvaluatePage(_FakePage):
+    def __init__(self, evaluate_result):
+        super().__init__()
+        self.evaluate_result = evaluate_result
+        self.evaluate_calls = []
+
+    def evaluate(self, script, arg):
+        self.evaluate_calls.append(arg)
+        return self.evaluate_result
+
+
+def test_click_anywhere_by_reasoning_clicks_the_matched_element():
+    page = _FakeEvaluatePage(evaluate_result=[820.0, 60.0])
+
+    found = action_executor._click_anywhere_by_reasoning(page, "Clicking the 'Sign up' link")
+
+    assert found is True
+    assert page.mouse.clicks == [(820.0, 60.0)]
+    assert page.evaluate_calls == ["Clicking the 'Sign up' link"]
+
+
+def test_click_anywhere_by_reasoning_returns_false_when_nothing_matches():
+    page = _FakeEvaluatePage(evaluate_result=None)
+
+    found = action_executor._click_anywhere_by_reasoning(page, "some vague reasoning")
+
+    assert found is False
+    assert page.mouse.clicks == []
+
+
+def test_click_anywhere_by_reasoning_survives_evaluate_raising():
+    class _BoomPage(_FakePage):
+        def evaluate(self, script, arg):
+            raise RuntimeError("execution context was destroyed")
+
+    found = action_executor._click_anywhere_by_reasoning(_BoomPage(), "click subscribe")
+
+    assert found is False
+
+
+# --- Stall detection + tier-2 recovery, wired into execute_action_loop -
+
+
+def test_loop_recovers_from_a_proven_stall_via_the_whole_page_fallback(tmp_path, monkeypatch):
+    """Two consecutive executed clicks that provably don't change the
+    page (proven via _page_signature, not inferred from reasoning text)
+    must trigger the whole-page text-match fallback -- and when THAT
+    finds a real target, the loop must actually click it and keep going,
+    not just report the same failure a third time."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    # 4 .content() calls expected: initial signature, after click 1
+    # (unchanged), after click 2 (unchanged -> triggers fallback), and
+    # once more after a successful fallback click (changed, simulating
+    # the fallback actually landing on the real target).
+    page = _FakeContentPage(content_sequence=["A", "A", "A", "B"])
+    _patch_browser(monkeypatch, page)
+    _steps_queue(
+        monkeypatch,
+        [
+            ActionStep(kind="click", x=500, y=500, reasoning="click subscribe"),
+            ActionStep(kind="click", x=500, y=500, reasoning="click subscribe"),
+            ActionStep(kind="done", reasoning="done"),
+        ],
+    )
+    fallback_calls = []
+
+    def fake_fallback(page_arg, reasoning, run_id=None):
+        fallback_calls.append(reasoning)
+        return True
+
+    monkeypatch.setattr(action_executor, "_click_anywhere_by_reasoning", fake_fallback)
+
+    workflow = action_executor.execute_action_loop("subscribe", "https://example.test", run_id="r-stall")
+
+    assert fallback_calls == ["click subscribe"]
+    assert workflow.success is True
+    assert any("stall recovery" in s.reasoning for s in workflow.steps)
+
+
+def test_loop_escalates_to_a_correction_hint_when_the_fallback_also_finds_nothing(tmp_path, monkeypatch):
+    """When even the whole-page fallback can't find a match, the loop
+    must not just silently repeat the identical question a third time --
+    the model must be told explicitly that its last estimate didn't
+    land."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakeContentPage(content_sequence=["A", "A", "A"])
+    _patch_browser(monkeypatch, page)
+    monkeypatch.setattr(action_executor, "_click_anywhere_by_reasoning", lambda page_arg, reasoning, run_id=None: False)
+
+    hints_seen = []
+    queue = iter(
+        [
+            ActionStep(kind="click", x=500, y=500, reasoning="click subscribe"),
+            ActionStep(kind="click", x=500, y=500, reasoning="click subscribe"),
+            ActionStep(kind="done", reasoning="done"),
+        ]
+    )
+
+    def fake_decide(screenshot_path, intent, history, *, run_id, node_id, hint=None):
+        hints_seen.append(hint)
+        return next(queue)
+
+    monkeypatch.setattr(action_executor, "decide_next_action", fake_decide)
+
+    action_executor.execute_action_loop("subscribe", "https://example.test", run_id="r-hint")
+
+    assert hints_seen == [None, None, action_executor._STALL_CORRECTION_HINT]
+
+
+def test_loop_does_not_stall_when_the_page_keeps_changing(tmp_path, monkeypatch):
+    """The stall detector must never fire on a normal, successfully
+    progressing run -- a different content signature after every step is
+    exactly what real progress looks like, not a stall."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakeContentPage(content_sequence=["A", "B", "C"])
+    _patch_browser(monkeypatch, page)
+    fallback_calls = []
+    monkeypatch.setattr(
+        action_executor, "_click_anywhere_by_reasoning", lambda page_arg, reasoning, run_id=None: fallback_calls.append(1)
+    )
+    _steps_queue(
+        monkeypatch,
+        [
+            ActionStep(kind="click", x=500, y=500, reasoning="click email field"),
+            ActionStep(kind="click", x=500, y=500, reasoning="click subscribe"),
+            ActionStep(kind="done", reasoning="done"),
+        ],
+    )
+
+    workflow = action_executor.execute_action_loop("subscribe", "https://example.test", run_id="r-normal")
+
+    assert fallback_calls == []  # the fallback must never have been invoked
+    assert workflow.success is True
+
+
+# --- Stall recovery in execute_login_and_extract's submit click -------
+
+
+def test_login_submit_recovers_from_a_stall_via_the_whole_page_fallback(tmp_path, monkeypatch):
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakeContentPage(content_sequence=["A", "A"])  # pre-submit, post-submit: unchanged
+    _patch_browser(monkeypatch, page)
+    fallback_calls = []
+
+    def fake_fallback(page_arg, reasoning, run_id=None):
+        fallback_calls.append(reasoning)
+        return True
+
+    monkeypatch.setattr(action_executor, "_click_anywhere_by_reasoning", fake_fallback)
+    queue = iter(
+        [
+            ActionStep(kind="click", x=200, y=200, reasoning="the email field"),
+            ActionStep(kind="click", x=200, y=400, reasoning="the login button"),
+            ActionStep(kind="done", reasoning="member content is now visible"),
+        ]
+    )
+    monkeypatch.setattr(
+        action_executor,
+        "decide_next_action",
+        lambda screenshot_path, intent, history, *, run_id, node_id, hint=None: next(queue),
+    )
+
+    workflow = action_executor.execute_login_and_extract(
+        email="judge@example.com", password=None, start_url="https://example.test", run_id="r-login-stall"
+    )
+
+    assert fallback_calls == ["the login button"]
+    assert workflow.success is True
+    assert any("stall recovery" in s.reasoning for s in workflow.steps)

@@ -89,6 +89,44 @@ def test_decide_next_action_returns_done_step(monkeypatch, tmp_path):
     assert step.x is None
 
 
+def test_decide_next_action_includes_the_hint_in_the_prompt_when_given(monkeypatch, tmp_path):
+    """action_executor.py's stall detector supplies a `hint` once it has
+    PROVEN (via a page-signature check) that the model's last action had
+    no effect and its own whole-page fallback also found nothing to
+    click. The model must actually see that correction, not have it
+    silently dropped."""
+    captured_prompts = []
+
+    def fake_decide_action(image_ref, prompt, *, run_id, node_id):
+        captured_prompts.append(prompt)
+        return '{"kind": "click", "x": 500, "y": 500, "reasoning": "trying again more carefully"}'
+
+    monkeypatch.setattr(vision_wrapper._vision_agent, "decide_action", fake_decide_action)
+
+    decide_next_action(
+        str(tmp_path / "shot.png"), "subscribe", [], run_id="r1", node_id="n1",
+        hint="Your last action did not visibly change the page.",
+    )
+
+    assert "Your last action did not visibly change the page." in captured_prompts[0]
+
+
+def test_decide_next_action_omits_any_hint_section_when_none_given(monkeypatch, tmp_path):
+    """The common case (no stall) must not clutter every single prompt
+    with an empty/irrelevant correction section."""
+    captured_prompts = []
+
+    def fake_decide_action(image_ref, prompt, *, run_id, node_id):
+        captured_prompts.append(prompt)
+        return '{"kind": "click", "x": 500, "y": 500, "reasoning": "clicking"}'
+
+    monkeypatch.setattr(vision_wrapper._vision_agent, "decide_action", fake_decide_action)
+
+    decide_next_action(str(tmp_path / "shot.png"), "subscribe", [], run_id="r1", node_id="n1")
+
+    assert "IMPORTANT:" not in captured_prompts[0]
+
+
 def test_decide_next_action_falls_back_to_stuck_on_unrecognized_kind(monkeypatch, tmp_path):
     """The model returning something outside the known action vocabulary
     (e.g. it invents "submit") must not propagate an invalid ActionStep --
