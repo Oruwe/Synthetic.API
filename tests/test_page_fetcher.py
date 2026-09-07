@@ -62,6 +62,70 @@ def test_fast_path_returns_none_when_word_count_too_low(monkeypatch):
     assert page is None  # signals the caller to try the Playwright fallback
 
 
+def test_fast_path_detects_a_gate_instead_of_falling_back_to_playwright(monkeypatch):
+    """A real subscribe-wall/paywall notice is a distinct outcome from a
+    generic low-content page: gated, not just "try Playwright" -- the
+    gate text usually renders server-side too, so a browser wouldn't see
+    anything different."""
+    html = "<html><body><div class='gate'>Subscribe to continue reading this article.</div></body></html>"
+    monkeypatch.setattr(httpx, "get", lambda *a, **kw: _FakeResponse(html))
+    monkeypatch.setattr(page_fetcher.trafilatura, "bare_extraction", lambda html, **kw: _doc(""))
+
+    page = page_fetcher._fetch_fast(_result(), timeout_seconds=9)
+
+    assert page is not None
+    assert page.gated is True
+    assert page.gate_reason is not None
+    assert page.error is None  # a gate is not a fetch failure
+
+
+def test_fast_path_with_thin_content_and_no_gate_phrase_still_falls_back(monkeypatch):
+    """Regression guard for the detector's own false-positive risk: thin
+    content alone, with no matching phrase, must still behave exactly as
+    before this feature existed -- try Playwright, not a spurious gate."""
+    monkeypatch.setattr(httpx, "get", lambda *a, **kw: _FakeResponse("<html><body>nav home about</body></html>"))
+    monkeypatch.setattr(page_fetcher.trafilatura, "bare_extraction", lambda html, **kw: _doc("too short"))
+
+    page = page_fetcher._fetch_fast(_result(), timeout_seconds=9)
+
+    assert page is None
+
+
+def test_fast_path_does_not_flag_a_gate_when_real_content_was_extracted(monkeypatch):
+    """A long, legitimately-fetched article that happens to mention one
+    of the gate phrases somewhere (a footer, a related-article teaser)
+    must not be flagged -- the word-count check gates the gate check."""
+    html = "<html><body>" + "real article content. " * 100 + " by the way, subscribe to continue reading our newsletter.</body></html>"
+    monkeypatch.setattr(httpx, "get", lambda *a, **kw: _FakeResponse(html))
+    monkeypatch.setattr(page_fetcher.trafilatura, "bare_extraction", lambda html, **kw: _doc("real article content. " * 100))
+
+    page = page_fetcher._fetch_fast(_result(), timeout_seconds=9)
+
+    assert page is not None
+    assert page.gated is False
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "Sign in to continue reading",
+        "Log in to view this content",
+        "Subscribe to read the full story",
+        "Register to continue",
+        "Create a free account to unlock this article",
+        "Enter your email to continue",
+        "This content is for subscribers only",
+        "Members-only content",
+    ],
+)
+def test_detect_gate_phrase_recognizes_common_gate_wording(phrase):
+    assert page_fetcher._detect_gate_phrase(f"<div>{phrase}</div>") is not None
+
+
+def test_detect_gate_phrase_returns_none_for_ordinary_text():
+    assert page_fetcher._detect_gate_phrase("<div>Welcome to our homepage. Read our latest updates.</div>") is None
+
+
 def test_fast_path_falls_back_to_search_result_title_when_none_extracted(monkeypatch):
     monkeypatch.setattr(httpx, "get", lambda *a, **kw: _FakeResponse("<html>...</html>"))
     monkeypatch.setattr(page_fetcher.trafilatura, "bare_extraction", lambda html, **kw: _doc("word " * 100, title=None))

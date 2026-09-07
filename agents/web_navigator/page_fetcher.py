@@ -34,6 +34,7 @@ one.
 
 import io
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -71,6 +72,36 @@ _MIN_ACCEPTABLE_WORD_COUNT = 40
 # per-domain rate limit/robots-fetch machinery without hammering a site
 # that happens to dominate a result set.
 _FETCH_CONCURRENCY = 4
+
+# Deliberately simple and rule-based, matching this codebase's established
+# style for this kind of signal (the payment guard in action_executor.py,
+# the intent classifier in planner.py) rather than a classifier model.
+# Searched against the RAW HTML/text, not just what trafilatura considers
+# "main content" -- a real gate notice is very often a banner/overlay
+# trafilatura's own article-extraction heuristics discard entirely,
+# leaving it with nothing at all rather than the gate copy itself. False
+# negatives (a gate this doesn't recognize) just mean the page is treated
+# as an ordinary low-content result, same as before this existed --
+# safe. Kept in sync with demo_target's own gated page wording, the same
+# way action_executor.py's payment-guard keywords are kept in sync with
+# demo_target's "Complete Purchase" button.
+_GATE_PHRASES = re.compile(
+    r"\b(sign\s*in\s*to\s*(continue|read)|log\s*in\s*to\s*(continue|read|view)|"
+    r"subscribe\s*to\s*(continue|read)|register\s*to\s*(continue|read)|"
+    r"create\s*a\s*free\s*account|enter\s*your\s*email\s*to\s*continue|"
+    r"members?[\s-]only|this\s*content\s*is\s*for\s*subscribers|paywall)\b",
+    re.IGNORECASE,
+)
+
+
+def _detect_gate_phrase(html_or_text: str) -> str | None:
+    """Only meaningful when the page ALSO came back with too little real
+    content (see the two call sites) -- a long, legitimately-fetched
+    article that happens to mention "sign in" in a footer somewhere must
+    not get flagged just because the phrase appears; requiring both
+    signals together is the mitigation for that false-positive risk."""
+    match = _GATE_PHRASES.search(html_or_text)
+    return match.group(0) if match else None
 
 
 def fetch_pages(results: list[SearchResult], timeout_seconds: float | None = None) -> list[FetchedPage]:
@@ -172,7 +203,18 @@ def _fetch_fast(result: SearchResult, timeout_seconds: float) -> FetchedPage | N
     document = trafilatura.bare_extraction(response.text, with_metadata=True)
     text = (document.text if document and document.text else "").strip()
     if len(text.split()) < _MIN_ACCEPTABLE_WORD_COUNT:
-        return None  # too little content -- let the caller try the Playwright fallback
+        gate_reason = _detect_gate_phrase(response.text)
+        if gate_reason:
+            return FetchedPage(
+                url=result.url,
+                title=result.title,
+                text="",
+                timestamp=datetime.now(timezone.utc),
+                fetch_method="http",
+                gated=True,
+                gate_reason=gate_reason,
+            )
+        return None  # too little content, no gate signal either -- let the caller try the Playwright fallback
 
     title = (document.title if document and document.title else None) or result.title
     return FetchedPage(
@@ -275,6 +317,18 @@ def _fetch_with_playwright(result: SearchResult, timeout_seconds: float) -> Fetc
     document = trafilatura.bare_extraction(html, with_metadata=True)
     text = (document.text if document and document.text else "").strip()
     title = (document.title if document and document.title else None) or result.title
+    if len(text.split()) < _MIN_ACCEPTABLE_WORD_COUNT:
+        gate_reason = _detect_gate_phrase(html)
+        if gate_reason:
+            return FetchedPage(
+                url=result.url,
+                title=title,
+                text="",
+                timestamp=datetime.now(timezone.utc),
+                fetch_method="playwright",
+                gated=True,
+                gate_reason=gate_reason,
+            )
     return FetchedPage(
         url=result.url,
         title=title,

@@ -24,6 +24,7 @@ from agents.common.models.dag import (
     NodeExecutionState,
     NodeStatus,
     NodeType,
+    PendingInputRequest,
     PlanValidationError,
     RunState,
 )
@@ -38,6 +39,26 @@ class RunContext:
 
     run_id: str
     data: dict[str, Any] = field(default_factory=dict)
+
+
+class AwaitingHumanInputError(Exception):
+    """A handler raises this to pause the run and ask a human for
+    information it cannot proceed without -- `fields` is one or both of
+    "email"/"password" (see PendingInputRequest's docstring in dag.py for
+    the real security engineering around the password case). Caught
+    specially in _run_node_with_retry, BEFORE the generic
+    `except Exception`: unlike a real failure, this is not retried on the
+    normal backoff schedule and never counts toward the circuit breaker
+    -- the node genuinely cannot make progress until the human answers,
+    and hammering it with retries would just ask the same unanswerable
+    question repeatedly.
+    """
+
+    def __init__(self, fields: list[str], prompt: str, url: str):
+        self.fields = fields
+        self.prompt = prompt
+        self.url = url
+        super().__init__(f"awaiting human input ({', '.join(fields)}) for {url}: {prompt}")
 
 
 HandlerFn = Callable[[DAGNode, RunContext], Any]
@@ -107,61 +128,134 @@ def execute_plan(plan: DAGPlan) -> RunState:
         graph = _build_graph(plan)
         run = run_store.create_run(plan)
         ctx = RunContext(run_id=plan.run_id)
-        node_by_id = {n.id: n for n in plan.nodes}
-
-        for node_id in nx.topological_sort(graph):
-            node = node_by_id[node_id]
-
-            deps_ok = all(
-                run.node_states[dep].status == NodeStatus.SUCCEEDED for dep in graph.predecessors(node_id)
-            )
-            if not deps_ok:
-                _transition(run, node_id, NodeStatus.SKIPPED, last_error="upstream dependency did not succeed")
-                continue
-
-            if run.failure_count >= plan.circuit_breaker_threshold:
-                _skip_remaining(run, graph, node_id)
-                run.overall_status = "circuit_broken"
-                run_store.save_run(run)
-                logger.error("circuit_breaker_tripped", failure_count=run.failure_count, node_id=node_id)
-                return run
-
-            _run_node_with_retry(run, node, ctx)
-
-            if run.failure_count >= plan.circuit_breaker_threshold:
-                remaining = list(nx.topological_sort(graph))
-                idx = remaining.index(node_id)
-                _skip_remaining_from(run, remaining[idx + 1 :])
-                run.overall_status = "circuit_broken"
-                run_store.save_run(run)
-                logger.error("circuit_breaker_tripped", failure_count=run.failure_count, node_id=node_id)
-                return run
-
-        run.overall_status = "failed" if any(
-            s.status == NodeStatus.FAILED for s in run.node_states.values()
-        ) else "completed"
-
-        # Ambient RPA action path reports synchronously here, unlike the
-        # live research path (fetch_pages/embed_pages), which only writes
-        # Qdrant chunks and leaves drafting the final answer to the
-        # Synthesizer's separate async poll loop. An action run has no LLM
-        # drafting step -- the outcome is a deterministic step sequence,
-        # not text to summarize -- so there's nothing for the Synthesizer
-        # to do, and waiting on its poll interval would just add latency
-        # for no benefit.
-        if any(n.type == NodeType.EXECUTE_ACTION for n in plan.nodes):
-            workflow = ctx.data.get("action_workflow")
-            run.action_workflow = workflow
-            message = _compose_action_answer(plan.transcript, workflow, run.overall_status)
-            run.answer = message
-            run.answer_text = message
-            notifier.notify(message, plan.run_id)
-
-        run_store.save_run(run)
-        logger.info("run_finished", overall_status=run.overall_status)
-        return run
+        return _walk_plan(plan, graph, run, ctx)
     finally:
         clear_run_context()
+
+
+def resume_plan(run_id: str, provided: dict[str, str]) -> RunState:
+    """Continues a run paused in overall_status="awaiting_human_input"
+    (see AwaitingHumanInputError) -- called by POST /runs/{run_id}/resume
+    (main.py) once a human supplies what was asked for. Loads the run
+    fresh from disk: a paused run's background task already returned (see
+    module docstring's "not Airflow/Temporal" -- there is no live thread
+    or generator sitting around waiting), so resuming means reconstructing
+    enough state to pick the topological walk back up, not waking
+    something already running.
+
+    `provided` may include "password" -- deliberately NEVER written into
+    run.human_provided_inputs (which IS persisted to disk via
+    run_store.save_run). Only non-secret fields (today: "email") are
+    persisted there. The full `provided` dict, password included, is
+    seeded into this call's own in-memory RunContext.data instead, which
+    is never serialized and is discarded the moment this function
+    returns -- see PendingInputRequest's docstring (dag.py) for where
+    each piece of that guarantee is actually enforced.
+    """
+    run = run_store.load_run(run_id)
+    if run is None:
+        raise ValueError(f"no such run: {run_id}")
+    if run.overall_status != "awaiting_human_input" or run.pending_input is None:
+        raise ValueError(f"run {run_id} is not awaiting human input (status={run.overall_status})")
+
+    bind_run_context(run_id=run_id)
+    try:
+        pending = run.pending_input
+        missing = [f for f in pending.fields if f not in provided or not provided[f]]
+        if missing:
+            raise ValueError(f"missing required field(s) for this run: {', '.join(missing)}")
+
+        node_id = pending.node_id
+        persisted = {k: v for k, v in provided.items() if k != "password"}
+        if persisted:
+            run.human_provided_inputs.setdefault(node_id, {}).update(persisted)
+        run.pending_input = None
+        run.overall_status = "running"
+        run_store.save_run(run)
+
+        graph = _build_graph(run.plan)
+        ctx = RunContext(run_id=run_id)
+        # The full answer (password included) lives ONLY here, in this
+        # call's own in-memory ctx -- never in what just got persisted
+        # above. handle_fetch_pages reads it from here, uses it, and it's
+        # gone once this function returns.
+        ctx.data.setdefault("human_provided_inputs", {})[node_id] = provided
+        return _walk_plan(run.plan, graph, run, ctx, resume_from=node_id)
+    finally:
+        clear_run_context()
+
+
+def _walk_plan(
+    plan: DAGPlan, graph: nx.DiGraph, run: RunState, ctx: RunContext, resume_from: str | None = None
+) -> RunState:
+    """The topological walk shared by a fresh execute_plan() run and a
+    resume_plan() continuation. `resume_from`, when given, starts the
+    walk AT that node (re-attempting it, now that ctx carries what it was
+    waiting for) rather than from the beginning -- every node before it
+    is already SUCCEEDED (or this run wouldn't have reached that node in
+    the first place) and is skipped, not re-run.
+    """
+    node_by_id = {n.id: n for n in plan.nodes}
+    order = list(nx.topological_sort(graph))
+    if resume_from is not None:
+        order = order[order.index(resume_from) :]
+
+    for node_id in order:
+        node = node_by_id[node_id]
+
+        deps_ok = all(
+            run.node_states[dep].status == NodeStatus.SUCCEEDED for dep in graph.predecessors(node_id)
+        )
+        if not deps_ok:
+            _transition(run, node_id, NodeStatus.SKIPPED, last_error="upstream dependency did not succeed")
+            continue
+
+        if run.failure_count >= plan.circuit_breaker_threshold:
+            _skip_remaining(run, graph, node_id)
+            run.overall_status = "circuit_broken"
+            run_store.save_run(run)
+            logger.error("circuit_breaker_tripped", failure_count=run.failure_count, node_id=node_id)
+            return run
+
+        paused = _run_node_with_retry(run, node, ctx)
+        if paused:
+            run.overall_status = "awaiting_human_input"
+            run_store.save_run(run)
+            logger.info("run_awaiting_human_input", node_id=node_id, fields=run.pending_input.fields)
+            return run
+
+        if run.failure_count >= plan.circuit_breaker_threshold:
+            remaining = list(nx.topological_sort(graph))
+            idx = remaining.index(node_id)
+            _skip_remaining_from(run, remaining[idx + 1 :])
+            run.overall_status = "circuit_broken"
+            run_store.save_run(run)
+            logger.error("circuit_breaker_tripped", failure_count=run.failure_count, node_id=node_id)
+            return run
+
+    run.overall_status = "failed" if any(
+        s.status == NodeStatus.FAILED for s in run.node_states.values()
+    ) else "completed"
+
+    # Ambient RPA action path reports synchronously here, unlike the
+    # live research path (fetch_pages/embed_pages), which only writes
+    # Qdrant chunks and leaves drafting the final answer to the
+    # Synthesizer's separate async poll loop. An action run has no LLM
+    # drafting step -- the outcome is a deterministic step sequence,
+    # not text to summarize -- so there's nothing for the Synthesizer
+    # to do, and waiting on its poll interval would just add latency
+    # for no benefit.
+    if any(n.type == NodeType.EXECUTE_ACTION for n in plan.nodes):
+        workflow = ctx.data.get("action_workflow")
+        run.action_workflow = workflow
+        message = _compose_action_answer(plan.transcript, workflow, run.overall_status)
+        run.answer = message
+        run.answer_text = message
+        notifier.notify(message, plan.run_id)
+
+    run_store.save_run(run)
+    logger.info("run_finished", overall_status=run.overall_status)
+    return run
 
 
 def _compose_action_answer(transcript: str, workflow: ActionWorkflow | None, overall_status: str) -> str:
@@ -181,13 +275,19 @@ def _compose_action_answer(transcript: str, workflow: ActionWorkflow | None, ove
     return f'Could not complete "{transcript}" (got stuck). Steps taken: {step_summary or "none"}.'
 
 
-def _run_node_with_retry(run: RunState, node: DAGNode, ctx: RunContext) -> None:
+def _run_node_with_retry(run: RunState, node: DAGNode, ctx: RunContext) -> bool:
+    """Returns True if the node paused the run awaiting human input (see
+    AwaitingHumanInputError) -- callers must stop the topological walk
+    and persist overall_status="awaiting_human_input" rather than treat
+    this as a normal completion. False for every other outcome (success,
+    exhausted retries, no handler registered), exactly as before this
+    return value existed."""
     bind_run_context(run_id=run.run_id, node_id=node.id)
     handler = HANDLER_REGISTRY.get(node.handler_key)
     if handler is None:
         _transition(run, node.id, NodeStatus.FAILED, last_error=f"no handler registered for '{node.handler_key}'")
         run.failure_count += 1
-        return
+        return False
 
     state = run.node_states[node.id]
     error: str | None = None
@@ -231,6 +331,20 @@ def _run_node_with_retry(run: RunState, node: DAGNode, ctx: RunContext) -> None:
                 attempt=attempt,
                 detail="outer timeout fired; the underlying thread may still be running",
             )
+        except AwaitingHumanInputError as exc:
+            # Deliberately NOT retried, NOT counted as a failure: the node
+            # can't make progress until a human answers, and looping
+            # through the normal retry/backoff schedule would just ask
+            # the same unanswerable question node.max_retries times.
+            state.status = NodeStatus.AWAITING_INPUT
+            state.last_error = None
+            state.finished_at = datetime.now(timezone.utc)
+            run_store.update_node_state(run, node.id, state)
+            run.pending_input = PendingInputRequest(
+                fields=exc.fields, prompt=exc.prompt, url=exc.url, node_id=node.id
+            )
+            logger.info("node_awaiting_human_input", fields=exc.fields, url=exc.url)
+            return True
         except Exception as exc:  # noqa: BLE001 - a handler failure must not crash the executor
             error = str(exc)
             logger.warning("node_attempt_failed", attempt=attempt, error=error)
@@ -240,7 +354,7 @@ def _run_node_with_retry(run: RunState, node: DAGNode, ctx: RunContext) -> None:
             state.result_summary = str(result)[:200] if result is not None else None
             run_store.update_node_state(run, node.id, state)
             logger.info("node_succeeded", attempt=attempt)
-            return
+            return False
 
         if attempt < node.max_retries:
             time.sleep(node.retry_backoff_seconds * attempt)
@@ -251,6 +365,7 @@ def _run_node_with_retry(run: RunState, node: DAGNode, ctx: RunContext) -> None:
     run_store.update_node_state(run, node.id, state)
     run.failure_count += 1
     logger.error("node_failed_exhausted_retries", max_retries=node.max_retries)
+    return False
 
 
 def _transition(run: RunState, node_id: str, status: NodeStatus, *, last_error: str | None = None) -> None:

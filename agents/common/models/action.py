@@ -54,6 +54,14 @@ class ActionWorkflow(BaseModel):
     # failure of capability. See action_executor.py's _looks_like_payment.
     refused_reason: str | None = None
     created_at: datetime
+    # Gated-content path only (agents/web_navigator/page_handlers.py):
+    # when this workflow's job was to get past a login/subscribe wall so
+    # the real page content becomes readable, the caller can pass
+    # action_executor.execute_action_loop() an `on_success_extract` hook
+    # that runs against the live page right before the browser closes --
+    # its result lands here. None for every ordinary action run (the
+    # ambient-RPA "do a task" path has no use for page text).
+    extracted_text: str | None = None
 
 
 class WorkflowMemory(BaseModel):

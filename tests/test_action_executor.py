@@ -104,6 +104,81 @@ def test_loop_stops_and_succeeds_when_model_says_done(tmp_path, monkeypatch):
     assert page.goto_calls == ["https://example.test"]
 
 
+def test_on_success_extract_hook_runs_before_the_browser_closes(tmp_path, monkeypatch):
+    """The gated-content path's whole reason for existing: getting past a
+    login/subscribe wall and reading what's now visible has to happen in
+    ONE continuous browser session (a fresh HTTP fetch afterward wouldn't
+    carry the session state that just proved the gate was passed). Prove
+    the hook actually receives the SAME live page the loop was using --
+    not a fresh/closed one -- by having it read something only visible in
+    that live session, and prove it's stored on the returned workflow."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakePage()
+    _patch_browser(monkeypatch, page)
+    _steps_queue(monkeypatch, [ActionStep(kind="done", reasoning="gate passed")])
+
+    captured_pages = []
+
+    def extract(live_page):
+        captured_pages.append(live_page)
+        return "the real article text, now visible"
+
+    workflow = action_executor.execute_action_loop(
+        "get past the gate", "https://example.test", run_id="r10", on_success_extract=extract
+    )
+
+    assert workflow.success is True
+    assert workflow.extracted_text == "the real article text, now visible"
+    assert captured_pages == [page]  # the hook saw the actual live page, not something else
+
+
+def test_on_success_extract_hook_is_not_called_on_a_non_success_outcome(tmp_path, monkeypatch):
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakePage()
+    _patch_browser(monkeypatch, page)
+    _steps_queue(monkeypatch, [ActionStep(kind="stuck", reasoning="couldn't find the field")])
+
+    called = {"value": False}
+
+    def extract(live_page):
+        called["value"] = True
+        return "should never be reached"
+
+    workflow = action_executor.execute_action_loop(
+        "get past the gate", "https://example.test", run_id="r11", on_success_extract=extract
+    )
+
+    assert workflow.success is False
+    assert workflow.extracted_text is None
+    assert called["value"] is False
+
+
+def test_on_success_extract_hook_failure_does_not_undo_a_real_success(tmp_path, monkeypatch):
+    """A broken extraction (e.g. trafilatura chokes on odd markup) must
+    not turn an actual, successfully-completed gate-pass into a failure
+    -- the physical action already happened."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakePage()
+    _patch_browser(monkeypatch, page)
+    _steps_queue(monkeypatch, [ActionStep(kind="done", reasoning="gate passed")])
+
+    def broken_extract(live_page):
+        raise RuntimeError("extraction blew up")
+
+    workflow = action_executor.execute_action_loop(
+        "get past the gate", "https://example.test", run_id="r12", on_success_extract=broken_extract
+    )
+
+    assert workflow.success is True  # the real success is preserved
+    assert workflow.extracted_text is None  # just no content came out of the broken hook
+
+
 def test_loop_stops_when_model_refuses(tmp_path, monkeypatch):
     from agents.common.config import settings
 
@@ -231,6 +306,239 @@ def test_loop_never_raises_on_a_browser_launch_failure(tmp_path, monkeypatch):
     assert workflow.success is False
     assert workflow.steps[-1].kind == "stuck"
     assert "no chromium binary" in workflow.steps[-1].reasoning
+
+
+# --- execute_login_and_extract -----------------------------------------
+#
+# Security is the actual subject under test here, not just behavior: the
+# whole reason this function exists separately from execute_action_loop
+# is that a password must never reach the vision model or the audit
+# trail. Every test below either proves the feature works (real
+# keystrokes happen) or proves the guarantee holds (the real value never
+# appears anywhere it shouldn't) -- several do both at once.
+
+
+def test_execute_login_and_extract_succeeds_and_redacts_the_password_in_the_audit_trail(tmp_path, monkeypatch):
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakePage()
+    _patch_browser(monkeypatch, page)
+    _steps_queue(
+        monkeypatch,
+        [
+            ActionStep(kind="click", x=200, y=200, reasoning="the email field"),
+            ActionStep(kind="click", x=200, y=300, reasoning="the password field"),
+            ActionStep(kind="click", x=200, y=400, reasoning="the login button"),
+            ActionStep(kind="done", reasoning="member content is now visible"),
+        ],
+    )
+
+    workflow = action_executor.execute_login_and_extract(
+        email="judge@example.com", password="hunter2", start_url="https://example.test", run_id="r1"
+    )
+
+    assert workflow.success is True
+    # the REAL keystrokes happened -- the feature actually works
+    assert "judge@example.com" in page.keyboard.typed
+    assert "hunter2" in page.keyboard.typed
+    # but the AUDIT TRAIL (what gets persisted/logged/could reach a
+    # future model prompt) never contains the real password
+    type_steps = [s for s in workflow.steps if s.kind == "type"]
+    assert any(s.text == "judge@example.com" for s in type_steps)  # email is fine to keep
+    assert any(s.text == "[REDACTED]" for s in type_steps)
+    assert not any(s.text == "hunter2" for s in workflow.steps)
+
+
+def test_execute_login_and_extract_password_never_appears_in_the_serialized_workflow(tmp_path, monkeypatch):
+    """The property that actually matters: not just 'the field says
+    REDACTED' but 'the real string is not present ANYWHERE in the
+    object that gets persisted to disk / returned over the API.'"""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakePage()
+    _patch_browser(monkeypatch, page)
+    _steps_queue(
+        monkeypatch,
+        [
+            ActionStep(kind="click", x=200, y=200, reasoning="the email field"),
+            ActionStep(kind="click", x=200, y=300, reasoning="the password field"),
+            ActionStep(kind="click", x=200, y=400, reasoning="the login button"),
+            ActionStep(kind="done", reasoning="member content is now visible"),
+        ],
+    )
+
+    workflow = action_executor.execute_login_and_extract(
+        email="judge@example.com", password="correct-horse-battery-staple", start_url="https://example.test", run_id="r2"
+    )
+
+    assert "correct-horse-battery-staple" not in workflow.model_dump_json()
+
+
+def test_execute_login_and_extract_never_sends_the_password_to_the_vision_model(tmp_path, monkeypatch):
+    """Direct proof of the core security property: capture every argument
+    passed to decide_next_action across the whole flow (prompt/intent
+    text AND the history it builds from prior steps) and assert the real
+    password is in none of it."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakePage()
+    _patch_browser(monkeypatch, page)
+
+    captured_intents = []
+    queue = iter(
+        [
+            ActionStep(kind="click", x=200, y=200, reasoning="the email field"),
+            ActionStep(kind="click", x=200, y=300, reasoning="the password field"),
+            ActionStep(kind="click", x=200, y=400, reasoning="the login button"),
+            ActionStep(kind="done", reasoning="member content is now visible"),
+        ]
+    )
+
+    def fake_decide(screenshot_path, intent, history, *, run_id, node_id):
+        captured_intents.append(intent)
+        for h in history:
+            captured_intents.append(str(h.text))
+        return next(queue)
+
+    monkeypatch.setattr(action_executor, "decide_next_action", fake_decide)
+
+    action_executor.execute_login_and_extract(
+        email="judge@example.com", password="hunter2", start_url="https://example.test", run_id="r3"
+    )
+
+    assert not any("hunter2" in text for text in captured_intents)
+
+
+def test_execute_login_and_extract_with_email_only_skips_the_password_field(tmp_path, monkeypatch):
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakePage()
+    _patch_browser(monkeypatch, page)
+    _steps_queue(
+        monkeypatch,
+        [
+            ActionStep(kind="click", x=200, y=200, reasoning="the email field"),
+            ActionStep(kind="click", x=200, y=400, reasoning="the login button"),
+            ActionStep(kind="done", reasoning="member content is now visible"),
+        ],
+    )
+
+    workflow = action_executor.execute_login_and_extract(
+        email="judge@example.com", password=None, start_url="https://example.test", run_id="r4"
+    )
+
+    assert workflow.success is True
+    assert page.keyboard.typed == ["judge@example.com"]
+
+
+def test_execute_login_and_extract_refuses_on_a_payment_shaped_submit_button(tmp_path, monkeypatch):
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakePage()
+    _patch_browser(monkeypatch, page)
+    _steps_queue(
+        monkeypatch,
+        [
+            ActionStep(kind="click", x=200, y=200, reasoning="the email field"),
+            ActionStep(kind="click", x=200, y=300, reasoning="the password field"),
+            ActionStep(kind="click", x=200, y=400, reasoning="click 'Confirm Payment' to submit"),
+        ],
+    )
+
+    workflow = action_executor.execute_login_and_extract(
+        email="judge@example.com", password="hunter2", start_url="https://example.test", run_id="r5"
+    )
+
+    assert workflow.success is False
+    assert workflow.refused_reason is not None
+    assert "payment" in workflow.refused_reason.lower()
+
+
+def test_execute_login_and_extract_returns_stuck_without_launching_a_browser_when_no_credentials_given(monkeypatch):
+    launched = {"value": False}
+
+    @contextmanager
+    def fake_launched_browser(timeout_ms=None):
+        launched["value"] = True
+        yield None
+
+    monkeypatch.setattr(action_executor, "launched_browser", fake_launched_browser)
+
+    workflow = action_executor.execute_login_and_extract(
+        email=None, password=None, start_url="https://example.test", run_id="r6"
+    )
+
+    assert workflow.success is False
+    assert workflow.steps[0].kind == "stuck"
+    assert launched["value"] is False
+
+
+def test_execute_login_and_extract_calls_the_extract_hook_on_success(tmp_path, monkeypatch):
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakePage()
+    _patch_browser(monkeypatch, page)
+    _steps_queue(
+        monkeypatch,
+        [
+            ActionStep(kind="click", x=200, y=200, reasoning="the email field"),
+            ActionStep(kind="click", x=200, y=400, reasoning="the login button"),
+            ActionStep(kind="done", reasoning="member content is now visible"),
+        ],
+    )
+
+    workflow = action_executor.execute_login_and_extract(
+        email="judge@example.com",
+        password=None,
+        start_url="https://example.test",
+        run_id="r7",
+        on_success_extract=lambda live_page: "the unlocked article text",
+    )
+
+    assert workflow.extracted_text == "the unlocked article text"
+
+
+# --- extract_visible_text --------------------------------------------
+
+
+class _FakeExtractPage:
+    def __init__(self, html: str, body_text: str = ""):
+        self._html = html
+        self._body_text = body_text
+
+    def content(self):
+        return self._html
+
+    def inner_text(self, selector):
+        assert selector == "body"
+        return self._body_text
+
+
+def test_extract_visible_text_uses_trafilatura_on_article_shaped_html():
+    html = "<html><body><article><p>" + "This is real article content. " * 20 + "</p></article></body></html>"
+    page = _FakeExtractPage(html)
+
+    text = action_executor.extract_visible_text(page)
+
+    assert "real article content" in text
+
+
+def test_extract_visible_text_falls_back_to_raw_body_text_when_trafilatura_finds_nothing():
+    """Right after a form submission, the "success" state can be a sparse
+    confirmation banner, not an article-shaped page -- trafilatura may
+    reasonably find nothing structured there. Content visibly on screen
+    must still come back, not silently turn into an empty string."""
+    page = _FakeExtractPage(html="<html></html>", body_text="Subscribed: judge@example.com")
+
+    text = action_executor.extract_visible_text(page)
+
+    assert text == "Subscribed: judge@example.com"
 
 
 # --- replay_workflow ------------------------------------------------

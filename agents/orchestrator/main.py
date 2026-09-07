@@ -7,7 +7,14 @@ Entry points into the whole system:
                          `answer` (full text incl. footer, backward-compatible), `answer_text`
                          (no footer -- for display/read-aloud), `sources` (structured
                          [{url,title,snippet,score}]), and `sources_attempted`/`sources_succeeded`
-                         are all populated (also readable at data/runs/<run_id>.json)
+                         are all populated (also readable at data/runs/<run_id>.json). A run paused
+                         on a content gate (feature/ambient-rpa-action-bridge) instead shows
+                         overall_status="awaiting_human_input" and `pending_input`.
+  POST /runs/{run_id}/resume - answers a paused run's `pending_input` (email and/or password,
+                         whichever pending_input.fields asks for) and continues it. See
+                         PendingInputRequest's docstring (agents/common/models/dag.py) for why
+                         password is handled the way it is -- never persisted, never logged,
+                         never sent to the vision model.
 """
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
@@ -17,7 +24,7 @@ from agents.common import run_store
 from agents.common.logging import configure_logging, get_logger
 from agents.common.readiness import run_readiness_checks
 from agents.orchestrator import omi_webhook, planner
-from agents.orchestrator.executor import execute_plan
+from agents.orchestrator.executor import execute_plan, resume_plan
 from agents.web_navigator import action_handlers, page_handlers  # noqa: F401 - registers handlers
 # NOTE: agents.orchestrator.handlers, agents.web_navigator.handlers, and
 # agents.web_navigator.research_handlers registered the shipping-portal and
@@ -98,3 +105,28 @@ def get_run(run_id: str):
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
     return run.model_dump(mode="json")
+
+
+class ResumeRequest(BaseModel):
+    email: str | None = None
+    password: str | None = None
+
+
+@app.post("/runs/{run_id}/resume", response_model=TriggerResponse)
+def resume_run(run_id: str, req: ResumeRequest, background_tasks: BackgroundTasks) -> TriggerResponse:
+    run = run_store.load_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    if run.overall_status != "awaiting_human_input" or run.pending_input is None:
+        raise HTTPException(status_code=409, detail=f"run is not awaiting human input (status={run.overall_status})")
+
+    provided = {k: v for k, v in {"email": req.email, "password": req.password}.items() if v}
+    missing = [f for f in run.pending_input.fields if f not in provided]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"missing required field(s): {', '.join(missing)}")
+
+    # Log which FIELDS were supplied, never the values -- see
+    # PendingInputRequest's docstring for why that distinction matters.
+    logger.info("run_resume_requested", run_id=run_id, fields=list(provided.keys()))
+    background_tasks.add_task(resume_plan, run_id, provided)
+    return TriggerResponse(run_id=run_id, status="running")

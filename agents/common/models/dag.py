@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from agents.common.models.action import ActionWorkflow
 from agents.common.models.page import Source
@@ -81,6 +81,13 @@ class NodeStatus(str, Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     SKIPPED = "skipped"
+    # Human-in-the-loop gate (feature/ambient-rpa-action-bridge): a node
+    # (currently only fetch_pages) hit a page that needs a piece of
+    # information only a person can supply -- see AwaitingHumanInputError
+    # in executor.py. Distinct from FAILED: this node WILL be retried, but
+    # only once the human answers, not on the normal retry/backoff
+    # schedule, and never counts toward the circuit breaker.
+    AWAITING_INPUT = "awaiting_input"
 
 
 class NodeExecutionState(BaseModel):
@@ -93,7 +100,42 @@ class NodeExecutionState(BaseModel):
     result_summary: str | None = None
 
 
-OverallStatus = Literal["running", "completed", "failed", "circuit_broken", "no_capability"]
+OverallStatus = Literal[
+    "running", "completed", "failed", "circuit_broken", "no_capability", "awaiting_human_input"
+]
+
+
+class PendingInputRequest(BaseModel):
+    """What the run is paused waiting for -- see AwaitingHumanInputError
+    (executor.py) and RunState.pending_input below.
+
+    `fields` is a closed Literal set (`email`, `password`), not a
+    placeholder for "add more fields later without thinking about it".
+    Even with both supported, this is scoped deliberately narrow: gate-
+    passing only ever runs against `demo_target` (a self-hosted, reversible
+    fixture with a throwaway demo account), never a real third-party
+    site -- and `password` is handled with real security engineering, not
+    just accepted and forgotten about:
+      - Never written into RunState.human_provided_inputs (which IS
+        persisted to disk) -- only `email` is. A password lives only in
+        the in-memory RunContext for the single resume call that uses it,
+        then is gone.
+      - Never sent to the vision model. The model is only ever asked
+        WHERE the password field is (a credential-free question); the
+        actual keystrokes happen directly in Playwright code with a
+        value the model never saw and was never told.
+      - Never appears in an ActionStep's `text` (and therefore never in
+        the audit trail, never embedded into Qdrant) -- recorded as
+        "[REDACTED]" instead. See action_executor.py's
+        execute_login_and_extract for exactly how.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    fields: list[Literal["email", "password"]]
+    prompt: str  # human-readable: what to show the user, e.g. "example.com needs a login to continue."
+    url: str  # the gated page, for context
+    node_id: str  # which node is paused waiting for this
 
 
 class RunState(BaseModel):
@@ -138,6 +180,18 @@ class RunState(BaseModel):
     # drafting step for a deterministic step-by-step outcome. None for
     # every non-action run.
     action_workflow: ActionWorkflow | None = None
+    # Human-in-the-loop gate (feature/ambient-rpa-action-bridge). Set
+    # together with overall_status="awaiting_human_input" when a node
+    # raises AwaitingHumanInputError (executor.py); cleared once
+    # POST /runs/{run_id}/resume supplies an answer. `human_provided_inputs`
+    # persists across the pause (unlike RunContext.data, which is
+    # in-memory only and does not survive the background task returning)
+    # so a resumed run's handler can find what the human answered -- keyed
+    # by node_id since a plan could in principle pause more than once
+    # across different nodes over its lifetime, though today only
+    # fetch_pages ever raises the gate.
+    pending_input: PendingInputRequest | None = None
+    human_provided_inputs: dict[str, dict[str, str]] = Field(default_factory=dict)
 
 
 class PlanValidationError(Exception):
