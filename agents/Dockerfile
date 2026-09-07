@@ -21,6 +21,7 @@ RUN uv run playwright install --with-deps chromium
 RUN uv run python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-small-en-v1.5')"
 
 COPY agents ./agents
+COPY scripts ./scripts
 COPY .env.example .env.example
 
 EXPOSE 8000
