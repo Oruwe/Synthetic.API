@@ -34,6 +34,20 @@ mkdir -p "$RUN_STORE_DIR" "$SCREENSHOT_DIR"
 export LANGFUSE_ENABLED="false"
 export REDIS_URL=""
 
+# Loopback-only, deliberately -- demo_target only ever needs to be reached
+# from WITHIN this container (the Playwright browser the ambient-RPA/
+# human-in-the-loop demo launches, running in this same process/container).
+# Binding 0.0.0.0 here (demo_target/app.py's own default, needed instead
+# for docker-compose, where it's a separate container reached over the
+# docker network) was a real, live bug on Render specifically: Render's
+# port-autodetection scans for the first open listening socket in the
+# container and treats it as the PUBLIC one, and this tiny Flask app opens
+# its port almost immediately -- long before the merged Orchestrator+UI
+# app below finishes importing everything and binds its own -- so Render
+# was routing all public traffic to this fixture instead of the real
+# product. See demo_target/app.py's own comment on this.
+export DEMO_TARGET_HOST="127.0.0.1"
+
 echo "[start.sh] launching demo_target (fixture pages for the ambient RPA / human-in-the-loop demo) on :5050"
 uv run python demo_target/app.py &
 

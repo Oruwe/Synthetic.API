@@ -36,6 +36,8 @@ nothing real to corrupt. Same Flask/server-rendered-HTML convention as
 mock_portal/app.py.
 """
 
+import os
+
 from flask import Flask, jsonify, render_template, request
 
 app = Flask(__name__)
@@ -130,4 +132,17 @@ def reset():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5050, debug=False)
+    # 0.0.0.0 by default -- needed for docker-compose, where this runs in
+    # its own container and must be reachable from agents-orchestrator over
+    # the docker network (http://demo_target:5050). deploy/common/start.sh
+    # (the single-container HF Spaces/Render deployments) overrides this to
+    # 127.0.0.1: there, this process shares a container with everything
+    # that needs to reach it, so loopback is sufficient -- and binding
+    # 0.0.0.0 there was a real, live bug: Render's port-autodetection scans
+    # for the first open listening socket in the container and locks onto
+    # it as the PUBLIC port, and this tiny Flask app opens its port almost
+    # immediately (long before the merged Orchestrator+UI app finishes
+    # importing everything and binds its own), so Render was routing all
+    # public traffic to this fixture instead of the real product.
+    host = os.environ.get("DEMO_TARGET_HOST", "0.0.0.0")
+    app.run(host=host, port=5050, debug=False)
