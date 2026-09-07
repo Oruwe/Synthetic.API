@@ -100,8 +100,12 @@ Fill in, at minimum:
   nothing useful without these.
 - **`ORCHESTRATOR_API_KEY`** — generate one and set it:
   ```bash
-  python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+  openssl rand -base64 32 | tr -d '\n='
   ```
+  (`openssl` rather than `python3` deliberately — it's on the VM by
+  default and, if you're copying commands from this guide into a
+  Windows Git Bash terminal too, `python3` there is often a Microsoft
+  Store stub that silently does nothing rather than run your code.)
   This is the single most important line in this whole guide. Without it,
   `/trigger` and `/runs/*` are open to anyone who finds your VM's IP —
   they could trigger arbitrary browser actions (the ambient RPA action
@@ -168,8 +172,8 @@ device or app at this VM is what makes this a real "synthetic API for
 Omi" deployment rather than a demo of one:
 
 1. **Set a real webhook secret**, if you haven't already — `OMI_WEBHOOK_SECRET`
-   in `.env`, same generation pattern as the others (`python3 -c
-   "import secrets; print(secrets.token_urlsafe(32))"`). Unlike
+   in `.env`, same generation pattern as the others
+   (`openssl rand -base64 32 | tr -d '\n='`). Unlike
    `ORCHESTRATOR_API_KEY`, this gates only `/webhook/omi` specifically
    (`agents/orchestrator/omi_webhook.py::verify_webhook_secret`) — it's a
    separate credential because it's presented by Omi's own infrastructure,
