@@ -10,7 +10,7 @@
 # is a dependency GROUP, not the hf-space optional-dependencies EXTRA
 # (which deliberately does pull the full list in, for a different
 # deployment that actually wants both together).
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 WORKDIR /app
 
