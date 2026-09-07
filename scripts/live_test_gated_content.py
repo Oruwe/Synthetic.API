@@ -73,6 +73,7 @@ def main() -> int:
     from agents.common import run_store
     from agents.common.models.dag import DAGNode, DAGPlan, NodeType
     from agents.orchestrator.executor import execute_plan, resume_plan
+    from agents.web_navigator import page_handlers  # noqa: F401 - registers "fetch_pages" into HANDLER_REGISTRY
 
     gate_url = f"{args.target_url.rstrip('/')}/{args.page}"
     email = args.email
