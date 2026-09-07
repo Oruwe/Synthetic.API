@@ -419,3 +419,22 @@ def _execute_step(page, step: ActionStep) -> None:
         page.mouse.wheel(0, _VIEWPORT["height"])
     else:
         raise ValueError(f"unexpected action kind reached _execute_step: {step.kind}")
+
+    # A click can trigger a full page navigation -- a plain HTML
+    # <form method="post"> submit, not an AJAX one, exactly what
+    # demo_target's gate forms use. page.mouse.click() only dispatches the
+    # synthetic mouse event and returns immediately; it does NOT wait for
+    # any resulting navigation. Without this, the next screenshot can be
+    # taken before the new page has rendered, showing the model the SAME
+    # pre-submission state -- which then reasons it needs to click
+    # "submit" again, and again, until the step ceiling is hit. Caught
+    # live against demo_target's /article gate (real Docker networking
+    # latency exposed the race), not by the mocked test suite, where a
+    # fake Page has nothing to navigate. wait_for_load_state resolves
+    # near-instantly when the click did NOT cause a navigation -- the
+    # page is already at the "load" state -- so this costs nothing on an
+    # ordinary same-page click/type/scroll.
+    try:
+        page.wait_for_load_state("load", timeout=5000)
+    except Exception:  # noqa: BLE001 - no navigation happened, or "load" wasn't reached in time; the caller's own post-step sleep still gives the page one more chance to settle
+        pass

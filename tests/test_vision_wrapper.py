@@ -105,6 +105,30 @@ def test_decide_next_action_falls_back_to_stuck_on_unrecognized_kind(monkeypatch
     assert step.kind == "stuck"
 
 
+def test_decide_next_action_accepts_a_genuine_stuck_kind_with_its_own_reasoning(monkeypatch, tmp_path):
+    """Regression test: action_executor.execute_login_and_extract's own
+    login-confirmation prompt explicitly asks the model for
+    'kind="stuck"' when the login did NOT succeed -- a model correctly
+    following that instruction must not have its real, specific reasoning
+    ("still shows the login form") thrown away and replaced with the
+    generic "no recognized action kind" message that used to fire here.
+    Caught live against demo_target's /members fixture: a genuinely
+    failed login attempt was misreported this way."""
+    monkeypatch.setattr(
+        vision_wrapper._vision_agent,
+        "decide_action",
+        lambda image_ref, prompt, *, run_id, node_id: (
+            '{"kind": "stuck", "reasoning": '
+            '"The screen still shows the login form, indicating the login attempt was unsuccessful."}'
+        ),
+    )
+
+    step = decide_next_action(str(tmp_path / "shot.png"), "log in", [], run_id="r1", node_id="n1")
+
+    assert step.kind == "stuck"
+    assert step.reasoning == "The screen still shows the login form, indicating the login attempt was unsuccessful."
+
+
 def test_decide_next_action_surfaces_the_raw_response_when_kind_is_unrecognized(monkeypatch, tmp_path):
     """Regression test: found live, against a real free-tier model, that
     an unparseable/empty response produced a "stuck" step with an EMPTY

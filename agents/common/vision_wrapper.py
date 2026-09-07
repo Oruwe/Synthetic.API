@@ -158,7 +158,20 @@ def analyze_screenshot(url: str, title: str, screenshot_path: str, query: str, *
     )
 
 
-_VALID_ACTION_KINDS = ("click", "type", "scroll", "done", "refused")
+#  "stuck" is normally only ever assigned BY this module itself (a parse
+# failure, an unrecognized kind, an exception) -- the general action
+# system prompt above never tells the model it's an option. But
+# action_executor.execute_login_and_extract's ad hoc login-confirmation
+# prompt explicitly does ask for it ('kind="done" if it succeeded,
+# kind="stuck" otherwise'), so a model correctly following THAT
+# instruction must not get its real, specific reasoning ("still shows
+# the login form") discarded and replaced with a generic "unrecognized
+# kind" message -- caught live: exactly that happened on a genuine failed
+# login attempt against demo_target's /members fixture. Accepting it here
+# is safe in the general loop too: if a model spontaneously answers
+# "stuck" with real reasoning there, treating it as a real stuck step
+# (preserving that reasoning) is strictly better than discarding it.
+_VALID_ACTION_KINDS = ("click", "type", "scroll", "done", "refused", "stuck")
 
 # Anchored on the exact field names the action system prompt asks for, so
 # this only ever salvages fields that were plausibly meant for this

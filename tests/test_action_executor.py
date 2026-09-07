@@ -41,6 +41,7 @@ class _FakePage:
         self.keyboard = _FakeKeyboard()
         self.screenshots = 0
         self.goto_calls = []
+        self.wait_for_load_state_calls = []
 
     def set_default_timeout(self, ms):
         pass
@@ -52,6 +53,13 @@ class _FakePage:
         self.screenshots += 1
         with open(path, "wb") as f:
             f.write(b"fake-png-bytes")
+
+    def wait_for_load_state(self, state="load", timeout=None):
+        # A fake page never navigates, so this is a no-op -- it exists so
+        # _execute_step's real post-action wait (see its own comment) has
+        # something to call without raising AttributeError. Recorded so a
+        # test can confirm it's actually invoked after every step.
+        self.wait_for_load_state_calls.append(state)
 
 
 class _FakeBrowser:
@@ -102,6 +110,63 @@ def test_loop_stops_and_succeeds_when_model_says_done(tmp_path, monkeypatch):
     assert [s.kind for s in workflow.steps] == ["click", "done"]
     assert page.mouse.clicks == [(640.0, 400.0)]  # (500/1000)*1280, (500/1000)*800
     assert page.goto_calls == ["https://example.test"]
+
+
+def test_execute_step_waits_for_load_state_after_a_click_that_might_navigate(tmp_path, monkeypatch):
+    """A form submit is a real page navigation; page.mouse.click() doesn't
+    wait for it on its own. Caught live: without this wait, a screenshot
+    taken right after a submit click can still show the pre-submission
+    page, driving the model to click "submit" again and again until the
+    step ceiling is hit (demo_target's /article gate, over real Docker
+    networking latency). Proven here at the unit level -- the mocked page
+    can't reproduce the race itself, but it CAN prove the wait is actually
+    called after every executed step, not just hoped for."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakePage()
+    _patch_browser(monkeypatch, page)
+    _steps_queue(
+        monkeypatch,
+        [
+            ActionStep(kind="click", x=500, y=500, reasoning="submit the form"),
+            ActionStep(kind="done", reasoning="goal accomplished"),
+        ],
+    )
+
+    action_executor.execute_action_loop("do the thing", "https://example.test", run_id="r1")
+
+    # Once for the click; "done" breaks the loop before ever reaching
+    # _execute_step, so exactly one call, not two.
+    assert page.wait_for_load_state_calls == ["load"]
+
+
+def test_execute_step_survives_wait_for_load_state_timing_out(tmp_path, monkeypatch):
+    """A click that DOESN'T cause navigation (e.g. one that opens a
+    JS-driven dropdown) can legitimately leave wait_for_load_state timing
+    out -- that must never surface as a loop failure, only as a missed
+    opportunity to shortcut the fixed post-step sleep."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+
+    class _SlowPage(_FakePage):
+        def wait_for_load_state(self, state="load", timeout=None):
+            raise TimeoutError("Timeout 5000ms exceeded.")
+
+    page = _SlowPage()
+    _patch_browser(monkeypatch, page)
+    _steps_queue(
+        monkeypatch,
+        [
+            ActionStep(kind="click", x=500, y=500, reasoning="click something inert"),
+            ActionStep(kind="done", reasoning="goal accomplished"),
+        ],
+    )
+
+    workflow = action_executor.execute_action_loop("do the thing", "https://example.test", run_id="r1")
+
+    assert workflow.success is True  # the timeout was swallowed, not propagated
 
 
 def test_on_success_extract_hook_runs_before_the_browser_closes(tmp_path, monkeypatch):
