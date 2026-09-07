@@ -3,12 +3,14 @@ single process on a single port.
 
 Why this exists: docker-compose keeps them as two separate services on two
 separate ports (agents-orchestrator:8000, demo-ui:7860) -- fine for a VM,
-where every port can be exposed independently. Hugging Face Spaces' Docker
-SDK routes external traffic to exactly one port, so a single-container
-deployment needs both behind that one port. See deploy/huggingface/'s
-Dockerfile/start.sh for the rest of that story (Qdrant bundled as a plain
-binary, everything supervised in one container) -- this file is only the
-"one process, one port" piece of it.
+where every port can be exposed independently. Every single-container
+target this repo supports (deploy/huggingface/, deploy/render/) routes
+external traffic to exactly one port, so a single-container deployment
+needs both behind that one port. Shared here (deploy/common/) rather than
+duplicated per target -- see each target's own Dockerfile/start.sh/
+SETUP.md for what's platform-specific (how Qdrant is reached, how the
+image gets built) -- this file is only the "one process, one port" piece,
+identical either way.
 
 Nothing about either app's own code changes here -- this only WIRES them
 together: `agents.orchestrator.main.app` keeps every one of its existing
@@ -31,7 +33,7 @@ process (this file). This works because Gradio runs its own callback
 functions (ask(), resume_gate()) in a worker thread, not on uvicorn's
 asyncio event loop -- so a blocking `requests.post("http://localhost:.../
 trigger")` from inside one of those callbacks doesn't block the very
-server it's calling into. deploy/huggingface/start.sh sets
+server it's calling into. deploy/common/start.sh sets
 ORCHESTRATOR_URL=http://localhost:<port> (the same port this merged app
 listens on) for exactly this reason.
 """

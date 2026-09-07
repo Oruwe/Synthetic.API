@@ -1,5 +1,15 @@
 # Deploying Synthetic.API to Hugging Face Spaces (free, no credit card)
 
+> **Currently blocked, flagged honestly:** as of ~July 2026, Hugging Face
+> marked the Docker SDK as a **paid** feature when creating a new Space
+> (confirmed on HF's own community forums; described there as possibly
+> temporary, tied to an infrastructure shortage). This guide is kept
+> ready and working — check whether Docker SDK is free again before
+> following it, and if it's still gated, see
+> **[deploy/render/SETUP.md](../render/SETUP.md)** instead, which runs
+> this exact same single-container build (`deploy/common/`) on Render's
+> free tier, no card, confirmed working as of this writing.
+
 This is the deployment path for when a real cloud VM isn't an option —
 Oracle/AWS/GCP/Azure all require a credit card even on their free tiers,
 and Azure for Students' verification doesn't work for every institution.

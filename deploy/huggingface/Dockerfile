@@ -1,8 +1,16 @@
 # Hugging Face Spaces (Docker SDK) deployment.
 #
+# STATUS (flagged honestly, see SETUP.md's top note): as of ~July 2026,
+# Hugging Face marked the Docker SDK as a PAID feature when creating a new
+# Space (confirmed on HF's own community forums, described there as
+# possibly temporary, tied to an infrastructure shortage). This file is
+# kept working and ready -- deploy/render/ is the currently-free path built
+# on the exact same deploy/common/ pieces, use that instead unless HF's
+# Docker SDK is free again by the time you read this (worth checking).
+#
 # See deploy/huggingface/SETUP.md for the full setup story and
-# deploy/huggingface/merged_app.py's docstring for why this exists at all:
-# HF Spaces routes external traffic to exactly one port, unlike
+# deploy/common/merged_app.py's docstring for why this exists at all: HF
+# Spaces routes external traffic to exactly one port, unlike
 # docker-compose's separate agents-orchestrator (8000) / demo-ui (7860)
 # services -- so this bundles both, plus demo_target and
 # agents-synthesizer, into one container, supervised by start.sh.
@@ -66,11 +74,11 @@ RUN uv run python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/b
 # docker-compose's separate demo_target service+image.
 RUN uv run python -m pip install --no-cache-dir -r demo_target/requirements.txt
 
-RUN chmod +x /app/deploy/huggingface/start.sh
+RUN chmod +x /app/deploy/common/start.sh
 
 # HF Spaces' Docker SDK routes external traffic to exactly this port --
 # must match SETUP.md's `app_port` frontmatter and start.sh's own
 # $PORT default.
 EXPOSE 7860
 
-CMD ["/app/deploy/huggingface/start.sh"]
+CMD ["/app/deploy/common/start.sh"]

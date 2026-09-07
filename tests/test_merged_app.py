@@ -1,7 +1,8 @@
-"""Tests for deploy/huggingface/merged_app.py -- the single-port merge of
-the Orchestrator's FastAPI app and the Gradio demo UI, built for
-single-port hosts (Hugging Face Spaces) where docker-compose's separate
-agents-orchestrator/demo-ui ports aren't available.
+"""Tests for deploy/common/merged_app.py -- the single-port merge of the
+Orchestrator's FastAPI app and the Gradio demo UI, shared by every
+single-container deployment target (deploy/huggingface/, deploy/render/)
+where docker-compose's separate agents-orchestrator/demo-ui ports aren't
+available.
 
 The real risk this guards against: gr.mount_gradio_app's mounted path
 ("/") could in principle shadow one of the Orchestrator's own routes, or a
@@ -15,7 +16,7 @@ regression, not a mocked-away one.
 from starlette.testclient import TestClient
 
 from agents.common.config import settings
-from deploy.huggingface.merged_app import app
+from deploy.common.merged_app import app
 
 client = TestClient(app)
 
