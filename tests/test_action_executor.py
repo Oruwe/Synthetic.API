@@ -354,11 +354,40 @@ def test_execute_step_maps_normalized_coordinates_to_viewport_pixels(tmp_path, m
     assert page.mouse.clicks == [(0.0, 0.0), (1280.0, 800.0)]
 
 
+class _FakeLogger:
+    """Captures (event, kwargs) pairs instead of rendering them, so a test
+    can assert on the actual logged fields directly -- same pattern as
+    test_lyzr_wrapper.py's own _FakeLogger. Deliberately NOT asserting on
+    rendered log text (via capsys/caplog) for these: this codebase's
+    structlog is configured once, globally, by whichever test module
+    happens to import something that calls configure_logging() first
+    (agents/common/logging.py) -- so the actual rendering (JSON vs
+    key=value) depends on test execution order and differs between
+    running this file alone vs. the full suite. Learned the hard way:
+    the first version of these tests asserted on rendered substrings like
+    "candidates_in_radius=0" and passed in isolation, then failed in the
+    full suite once an earlier-run test's configure_logging() call had
+    already switched the global renderer to JSON, where the same field
+    renders as "candidates_in_radius": 0 instead."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, dict]] = []
+
+    def info(self, event, **kwargs):
+        self.calls.append((event, kwargs))
+
+    def warning(self, event, **kwargs):
+        self.calls.append((event, kwargs))
+
+
 class _FakeSnapPage(_FakePage):
     """A _FakePage that also implements .evaluate, returning whatever
     `snap_result` is set to -- standing in for _SNAP_TO_CLICKABLE_JS's
-    real return value (a [x, y] pair, or null/None when the model's own
-    coordinate already landed on something clickable)."""
+    real return value: a dict with a `moved` key (an [x, y] pair, or
+    None/absent when the model's own coordinate already landed on the
+    chosen target) plus diagnostic fields (`direct`, `candidatesInRadius`,
+    `nearestClickable`, `nearestClickableDist`) that _snap_to_clickable
+    logs but doesn't act on."""
 
     def __init__(self, snap_result):
         super().__init__()
@@ -380,7 +409,8 @@ def test_execute_step_snaps_a_click_onto_a_nearby_clickable_element(tmp_path, mo
     from agents.common.config import settings
 
     monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
-    page = _FakeSnapPage(snap_result=[650.0, 410.0])  # the button's real center, a bit off from the model's guess
+    # the button's real center, a bit off from the model's guess
+    page = _FakeSnapPage(snap_result={"moved": [650.0, 410.0], "direct": "DIV", "candidatesInRadius": 1})
     _patch_browser(monkeypatch, page)
     _steps_queue(
         monkeypatch,
@@ -397,14 +427,14 @@ def test_execute_step_snaps_a_click_onto_a_nearby_clickable_element(tmp_path, mo
 
 
 def test_execute_step_does_not_move_a_click_already_on_a_clickable_element(tmp_path, monkeypatch):
-    """The snap JS returns null when the model's own coordinate is
-    already on something clickable -- an already-correct click must be
+    """The snap JS reports `moved: null` when the model's own coordinate
+    is already on the chosen target -- an already-correct click must be
     executed exactly where the model aimed it, never relocated onto some
     other nearby control."""
     from agents.common.config import settings
 
     monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
-    page = _FakeSnapPage(snap_result=None)
+    page = _FakeSnapPage(snap_result={"moved": None, "direct": "BUTTON#gate-submit-btn", "candidatesInRadius": 1})
     _patch_browser(monkeypatch, page)
     _steps_queue(
         monkeypatch,
@@ -417,6 +447,49 @@ def test_execute_step_does_not_move_a_click_already_on_a_clickable_element(tmp_p
     action_executor.execute_action_loop("do the thing", "https://example.test", run_id="r1")
 
     assert page.mouse.clicks == [(640.0, 400.0)]  # unchanged: (500/1000)*1280, (500/1000)*800
+
+
+def test_execute_step_logs_distinguish_no_candidates_nearby_from_already_correct(tmp_path, monkeypatch):
+    """A THIRD live round still failed after the reasoning-aware snap
+    fix, logging click_snap_unchanged on every attempt with no way to
+    tell, from that alone, whether it meant "already correctly on
+    target" (should have worked) or "nothing clickable found nearby at
+    all" (a miss too far for any snap radius to rescue). This is the fix
+    for THAT blind spot: the diagnostic fields (direct element,
+    candidate count, and the single nearest real clickable element's
+    identity/distance even when it's outside the radius) must be present
+    in the log line so a live run is self-diagnosing without needing a
+    screenshot handed back and forth."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakeSnapPage(
+        snap_result={
+            "moved": None,
+            "direct": "DIV",
+            "candidatesInRadius": 0,
+            "nearestClickable": 'BUTTON#gate-submit-btn "Subscribe to continue reading"',
+            "nearestClickableDist": 187,
+        }
+    )
+    _patch_browser(monkeypatch, page)
+    fake_logger = _FakeLogger()
+    monkeypatch.setattr(action_executor, "logger", fake_logger)
+    _steps_queue(
+        monkeypatch,
+        [
+            ActionStep(kind="click", x=500, y=500, reasoning="click subscribe"),
+            ActionStep(kind="done", reasoning="done"),
+        ],
+    )
+
+    action_executor.execute_action_loop("do the thing", "https://example.test", run_id="r-diag")
+
+    snap_calls = [kwargs for event, kwargs in fake_logger.calls if event == "click_snap_result"]
+    assert len(snap_calls) == 1
+    assert snap_calls[0]["candidates_in_radius"] == 0
+    assert snap_calls[0]["nearest_clickable_dist_px"] == 187
+    assert "gate-submit-btn" in snap_calls[0]["nearest_clickable"]
 
 
 def test_execute_step_click_survives_evaluate_raising(tmp_path, monkeypatch):
@@ -447,18 +520,13 @@ def test_execute_step_click_survives_evaluate_raising(tmp_path, monkeypatch):
     assert page.mouse.clicks == [(640.0, 400.0)]  # fell back to the raw coordinates
 
 
-def test_execute_step_logs_when_the_snap_evaluate_call_fails(tmp_path, monkeypatch, capsys):
+def test_execute_step_logs_when_the_snap_evaluate_call_fails(tmp_path, monkeypatch):
     """Two live rounds of "the fix should work but the exact same failure
     kept recurring" had no way to tell, from the run's OWN logs, whether
     _snap_to_clickable was even reaching page.evaluate successfully on
     the user's real environment -- it silently swallowed every exception.
     This is the fix for that blind spot: a failure must be visible in the
-    run's logs, not just invisible inside a try/except.
-
-    Uses capsys, not caplog: this codebase's structlog is configured with
-    PrintLoggerFactory (agents/common/logging.py), which writes straight
-    to stdout rather than through Python's stdlib logging handlers --
-    caplog only ever sees the latter, so it can't observe this output."""
+    run's logs, not just invisible inside a try/except."""
     from agents.common.config import settings
 
     monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
@@ -469,6 +537,8 @@ def test_execute_step_logs_when_the_snap_evaluate_call_fails(tmp_path, monkeypat
 
     page = _BoomOnEvaluatePage()
     _patch_browser(monkeypatch, page)
+    fake_logger = _FakeLogger()
+    monkeypatch.setattr(action_executor, "logger", fake_logger)
     _steps_queue(
         monkeypatch,
         [
@@ -479,21 +549,22 @@ def test_execute_step_logs_when_the_snap_evaluate_call_fails(tmp_path, monkeypat
 
     action_executor.execute_action_loop("do the thing", "https://example.test", run_id="r-log-fail")
 
-    out = capsys.readouterr().out
-    assert "click_snap_evaluate_failed" in out
-    assert "execution context was destroyed" in out
+    failures = [kwargs for event, kwargs in fake_logger.calls if event == "click_snap_evaluate_failed"]
+    assert len(failures) == 1
+    assert failures[0]["error"] == "execution context was destroyed"
 
 
-def test_execute_step_logs_when_the_snap_moves_a_click(tmp_path, monkeypatch, capsys):
+def test_execute_step_logs_when_the_snap_moves_a_click(tmp_path, monkeypatch):
     """The success path is logged too -- so a live run's logs show
     whether a click actually got relocated, not just whether the
-    mechanism ran without raising. See the previous test's docstring for
-    why this uses capsys rather than caplog."""
+    mechanism ran without raising."""
     from agents.common.config import settings
 
     monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
-    page = _FakeSnapPage(snap_result=[650.0, 410.0])
+    page = _FakeSnapPage(snap_result={"moved": [650.0, 410.0], "direct": "DIV", "candidatesInRadius": 1})
     _patch_browser(monkeypatch, page)
+    fake_logger = _FakeLogger()
+    monkeypatch.setattr(action_executor, "logger", fake_logger)
     _steps_queue(
         monkeypatch,
         [
@@ -504,7 +575,9 @@ def test_execute_step_logs_when_the_snap_moves_a_click(tmp_path, monkeypatch, ca
 
     action_executor.execute_action_loop("do the thing", "https://example.test", run_id="r-log-moved")
 
-    assert "click_snap_moved" in capsys.readouterr().out
+    snap_calls = [kwargs for event, kwargs in fake_logger.calls if event == "click_snap_result"]
+    assert len(snap_calls) == 1
+    assert snap_calls[0]["moved"] == [650.0, 410.0]
 
 
 def test_loop_never_raises_on_a_browser_launch_failure(tmp_path, monkeypatch):

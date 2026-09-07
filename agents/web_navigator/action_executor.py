@@ -416,9 +416,15 @@ _SNAP_TO_CLICKABLE_JS = """
     const ownText = (el) => (
         el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("placeholder") || ""
     ).trim();
+    const describe = (el) => el ? (el.tagName + (el.id ? "#" + el.id : "") + (ownText(el) ? " " + JSON.stringify(ownText(el).slice(0, 40)) : "")) : null;
 
     const direct = document.elementFromPoint(x, y);
-    const candidates = Array.from(document.querySelectorAll(
+    // Distances computed against EVERY clickable element on the page, not
+    // just ones within radius -- this is what lets the caller tell "the
+    // model's guess just missed by a few px" apart from "the model's
+    // guess is nowhere near any real control", which only tracking
+    // in-radius candidates could never distinguish.
+    const all = Array.from(document.querySelectorAll(
         "button, a, input, textarea, select, [role=button], [role=link], [onclick]"
     )).map(el => {
         const rect = el.getBoundingClientRect();
@@ -426,35 +432,45 @@ _SNAP_TO_CLICKABLE_JS = """
         const cx = rect.left + rect.width / 2;
         const cy = rect.top + rect.height / 2;
         return {el, cx, cy, dist: Math.hypot(cx - x, cy - y)};
-    }).filter(c => c && c.dist <= radius);
+    }).filter(Boolean);
 
-    if (candidates.length === 0) return null;
+    const nearest = all.reduce((best, c) => (!best || c.dist < best.dist) ? c : best, null);
+    const inRadius = all.filter(c => c.dist <= radius);
 
-    // Prefer whichever nearby candidate's own visible text/label the
-    // model's reasoning actually quotes -- the model very often names
-    // exactly what it means to click (e.g. "Clicking the 'Subscribe to
-    // continue reading' button"). Raw pixel proximity alone can't
-    // disambiguate two clickable elements only a few pixels apart (e.g.
-    // an input immediately above a submit button) -- this can, since it
-    // uses a signal the model already gave us, not just geometry.
-    const reasoningLower = (reasoning || "").toLowerCase();
     let chosen = null;
-    if (reasoningLower) {
-        let bestLen = 0;
-        for (const c of candidates) {
-            const t = ownText(c.el).toLowerCase();
-            if (t.length >= 3 && reasoningLower.includes(t) && t.length > bestLen) {
-                chosen = c;
-                bestLen = t.length;
+    if (inRadius.length > 0) {
+        // Prefer whichever nearby candidate's own visible text/label the
+        // model's reasoning actually quotes -- the model very often
+        // names exactly what it means to click (e.g. "Clicking the
+        // 'Subscribe to continue reading' button"). Raw pixel proximity
+        // alone can't disambiguate two clickable elements only a few
+        // pixels apart (e.g. an input immediately above a submit
+        // button) -- this can, since it uses a signal the model already
+        // gave us, not just geometry.
+        const reasoningLower = (reasoning || "").toLowerCase();
+        if (reasoningLower) {
+            let bestLen = 0;
+            for (const c of inRadius) {
+                const t = ownText(c.el).toLowerCase();
+                if (t.length >= 3 && reasoningLower.includes(t) && t.length > bestLen) {
+                    chosen = c;
+                    bestLen = t.length;
+                }
             }
         }
-    }
-    if (!chosen) {
-        chosen = candidates.reduce((best, c) => (!best || c.dist < best.dist) ? c : best, null);
+        if (!chosen) {
+            chosen = inRadius.reduce((best, c) => (!best || c.dist < best.dist) ? c : best, null);
+        }
     }
 
-    if (chosen.el === direct) return null;  // already exactly on the chosen target, don't touch it
-    return [chosen.cx, chosen.cy];
+    const moved = (chosen && chosen.el !== direct) ? [chosen.cx, chosen.cy] : null;
+    return {
+        moved,
+        direct: describe(direct),
+        candidatesInRadius: inRadius.length,
+        nearestClickable: nearest ? describe(nearest.el) : null,
+        nearestClickableDist: nearest ? Math.round(nearest.dist) : null,
+    };
 }
 """
 
@@ -465,56 +481,64 @@ def _snap_to_clickable(
     """Nudges a click/focus target onto the nearest real clickable element
     when the model's coordinate guess landed on the wrong spot.
 
-    Found live, in two rounds: a manual browser test proved demo_target's
-    gate forms work fine end to end, which isolated a live run's repeated
-    failed "submit" clicks (same reasoning, same non-progress, every
-    attempt) to the model's own coordinate guess -- not a page bug, and
-    not the navigation-timing race an earlier fix addressed. The FIRST
-    version of this function (raw nearest-clickable-within-radius, only
-    triggered when the exact point wasn't already on something clickable)
-    still failed the exact same way: demo_target's email input and submit
-    button sit only ~8px apart, so a guess landing a few pixels high
-    inside the email input's own box was *already* "on something
-    clickable" by that check -- just the WRONG clickable element -- and
-    the old logic left it there. Reproduced and fixed against a local
-    replica of that exact layout before shipping this: the model's own
-    `reasoning` almost always names its real target by its visible label
-    ("Clicking the 'Subscribe to continue reading' button..."), so this
-    version prefers whichever nearby candidate's own text the reasoning
-    actually quotes over raw proximity, which is what correctly
-    disambiguates two controls sitting a few pixels apart. Falls back to
-    nearest-by-distance when reasoning doesn't name anything nearby (e.g.
-    a plain focus click on an unlabeled field), same as before.
+    Found live, in three rounds: a manual browser test proved
+    demo_target's gate forms work fine end to end, which isolated a live
+    run's repeated failed "submit" clicks (same reasoning, same
+    non-progress, every attempt) to the model's own coordinate guess --
+    not a page bug, and not the navigation-timing race an earlier fix
+    addressed. The FIRST version of this function (raw nearest-clickable-
+    within-radius, only triggered when the exact point wasn't already on
+    something clickable) still failed the exact same way: demo_target's
+    email input and submit button sit only ~8px apart, so a guess
+    landing a few pixels high inside the email input's own box was
+    *already* "on something clickable" by that check -- just the WRONG
+    clickable element -- and the old logic left it there. The SECOND
+    version added reasoning-text matching to disambiguate nearby
+    candidates and was verified, live, to correctly resolve that exact
+    adversarial case against a local replica -- but a THIRD live round
+    still failed identically, logging click_snap_unchanged on every
+    attempt with no way to tell whether that meant "already correctly on
+    target" (should have worked) or "nothing clickable found nearby at
+    all" (a miss far outside any reasonable snap radius). This version
+    closes THAT blind spot: it always reports what's directly under the
+    model's coordinate, how many real candidates are within the snap
+    radius, and -- critically -- how far away and what the single
+    nearest real clickable element on the whole page actually is, even
+    when that's outside the radius. That last figure is what finally
+    tells the caller (from logs alone, no screenshot needed) whether a
+    miss is "just needs a bigger radius" or "the model's spatial
+    estimate for this control is off by a wide margin, which no
+    execution-side nudge can paper over."
 
     The model still does 100% of the visual reasoning (what to click and
-    roughly where, and now implicitly its label too, via reasoning it
+    roughly where, and implicitly its label too, via reasoning it
     already produces for its own purposes) -- this only makes EXECUTION
     forgiving of a modest miss, the same way a real mouse click a few
     pixels off a button's edge still usually "counts" for a human. An
     already-correct click is never moved: only a miss (or a click that
-    landed on the wrong nearby element) triggers a search.
+    landed on the wrong nearby element) triggers a relocation.
 
     Falls back to the original coordinates on ANY failure (a fake Page in
     tests with no .evaluate, a cross-origin frame, anything else) -- this
     is a best-effort nudge, never a hard requirement for a click to
-    proceed. Logged either way (a warning on failure, info on the result)
-    rather than swallowed silently: two prior live rounds of "the fix
-    should work but the exact same failure kept recurring" had no way to
-    tell, from the run's own logs, whether this function was even
-    reaching page.evaluate successfully -- this closes that blind spot.
+    proceed. Every outcome is logged, never swallowed silently -- see the
+    version history above for why that discipline exists.
     """
     try:
-        snapped = page.evaluate(_SNAP_TO_CLICKABLE_JS, [x, y, _CLICK_SNAP_RADIUS_PX, reasoning])
+        result = page.evaluate(_SNAP_TO_CLICKABLE_JS, [x, y, _CLICK_SNAP_RADIUS_PX, reasoning])
     except Exception as exc:  # noqa: BLE001 - best-effort only, see docstring
         logger.warning("click_snap_evaluate_failed", run_id=run_id, error=str(exc))
         return x, y
-    if snapped and len(snapped) == 2:
-        logger.info(
-            "click_snap_moved", run_id=run_id, from_x=round(x), from_y=round(y),
-            to_x=round(snapped[0]), to_y=round(snapped[1]),
-        )
-        return float(snapped[0]), float(snapped[1])
-    logger.info("click_snap_unchanged", run_id=run_id, x=round(x), y=round(y))
+
+    result = result or {}
+    moved = result.get("moved")
+    logger.info(
+        "click_snap_result", run_id=run_id, x=round(x), y=round(y), moved=moved, direct=result.get("direct"),
+        candidates_in_radius=result.get("candidatesInRadius"), nearest_clickable=result.get("nearestClickable"),
+        nearest_clickable_dist_px=result.get("nearestClickableDist"),
+    )
+    if moved and len(moved) == 2:
+        return float(moved[0]), float(moved[1])
     return x, y
 
 

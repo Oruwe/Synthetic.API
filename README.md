@@ -337,6 +337,18 @@ lightly applied here.
   page in tests, a cross-origin frame) falls back to the model's raw
   coordinates rather than blocking the step.
 
+  A third live round still failed identically after that fix, logging
+  "unchanged" on every attempt with no way to tell whether that meant
+  "already correctly on target" or "nothing clickable found nearby at
+  all." `_snap_to_clickable` now logs a full diagnostic on every call —
+  what's directly under the model's coordinate, how many real candidates
+  sit within the snap radius, and the identity/distance of the single
+  nearest real clickable element on the page even when it's outside that
+  radius — so a live run is self-diagnosing (a "just needs a bigger
+  radius" 70px miss reads completely differently in the logs from a
+  500px one, which no execution-side nudge could ever paper over) without
+  a screenshot needing to be handed back and forth to debug it.
+
 Reports its outcome directly onto `RunState.answer`/`answer_text` once the
 DAG finishes (`executor.py`'s `_compose_action_answer`) — there's no LLM
 drafting step for a deterministic step sequence, so this path never
