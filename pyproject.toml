@@ -72,10 +72,10 @@ ui = [
     "requests>=2.32",
 ]
 mock-portal = [
-    "flask==3.0.3",
+    "flask==3.1.3",
 ]
 demo-target = [
-    "flask==3.0.3",
+    "flask==3.1.3",
 ]
 
 [tool.uv]
