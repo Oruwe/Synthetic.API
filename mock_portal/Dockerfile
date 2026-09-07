@@ -4,7 +4,7 @@
 # reasoning on why this is a `uv sync --only-group` dependency group, not
 # its own separate requirements.txt or the hf-space optional-dependencies
 # extra.
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 WORKDIR /app
 
