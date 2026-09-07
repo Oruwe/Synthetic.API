@@ -328,18 +328,26 @@ lightly applied here.
   1. **Local geometric snap** (`_snap_to_clickable`) — if the model's
      exact coordinate isn't already on a clickable element, search a
      small radius (60px) for the nearest one and click that instead.
-     Candidates are scored against the model's own `reasoning` text two
-     ways: literal visible-text containment (a button/link whose label
-     the reasoning quotes verbatim) and semantic field-purpose matching
-     (an input's `type`/`name`/`id`/`autocomplete`/associated `<label>`
-     against a short, generic keyword list — "email", "password",
-     "username", etc.) — the second is what lets a field referred to by
-     *role* ("the email field") match an input that has no visible text
-     to quote in the first place, unlike a button. Handles a modest miss.
-     Every outcome is logged with a full diagnostic — what's directly
-     under the coordinate, how many candidates are in radius, and the
-     identity/distance of the single nearest clickable element on the
-     whole page even when it's outside that radius — so a live run is
+     Candidates are scored against the model's own `reasoning` text in
+     three tiers, each a fallback for what the one before it can't catch:
+     (a) the full visible label quoted verbatim ("Clicking the
+     'Subscribe to continue reading' button…") — strongest signal; (b)
+     word-level overlap for a paraphrase of that label ("the subscribe
+     button") — found live, a real run's own reasoning paraphrased rather
+     than quoted, and a plain full-string check alone scored 0; (c)
+     semantic field-purpose matching for an input with no visible label
+     to quote at all (its `type`/`name`/`id`/`autocomplete`/`<label>`
+     against a short keyword list — "email", "password", etc.), lowest
+     priority since a keyword merely co-occurring in the reasoning isn't
+     proof the reasoning is actually about that element — found live,
+     without that ordering, "the email has been entered, now click
+     subscribe" matched the wrong element (the email input, tier c) over
+     the real target (the button, unscored under (a) alone) purely
+     because "email" happened to appear as passing context. Handles a
+     modest miss. Every outcome is logged with a full diagnostic — what's
+     directly under the coordinate, how many candidates are in radius,
+     and the identity/distance of the single nearest clickable element on
+     the whole page even when it's outside that radius — so a live run is
      self-diagnosing without a screenshot ever needing to be handed back
      and forth to debug it.
   2. **Stall detection** (`_page_signature`) — a SHA-256 fingerprint of
@@ -380,18 +388,17 @@ lightly applied here.
   path only for a page that doesn't use standard input types.
 
   All of this was proven end to end against a real headless Chromium and
-  demo_target's actual markup, driven by the live diagnostics from a real
-  run rather than a synthetic reproduction: `nearest_clickable` correctly
-  identified the right input every single time but never scored a match
-  (the literal-text-only gap #1 above closes); a correctly-clicked real
-  button still left the gate locked because the field it was supposed to
-  fill was never actually typed into (the type-recovery gap in #3
-  closes); and the login flow now bypasses vision grounding for its
-  fields entirely. Each fix was verified by actually running it — logging
-  in, filling the real field, submitting the real form, and checking the
-  *extracted content* is genuinely the unlocked version (a phrase that
-  only exists past the gate), not just that a click executed without
-  raising.
+  demo_target's actual markup, driven by the live diagnostics from real
+  runs rather than a synthetic reproduction — and the decisive check
+  wasn't "a click executed without raising," it was replaying the
+  *exact* decision sequence from an actual failed live run and checking
+  the extracted content afterward is genuinely the unlocked version (a
+  phrase that only exists past the gate), not the still-locked teaser.
+  Both fixtures pass this way now: the login flow (`/members`) via the
+  direct-selector path, and the email-only gate (`/article`) via the
+  fully-tiered fallback — the same real run that first exposed the
+  paraphrase-matching gap, replayed after the fix, unlocks the article
+  one recovery attempt earlier than it took live.
 
 Reports its outcome directly onto `RunState.answer`/`answer_text` once the
 DAG finishes (`executor.py`'s `_compose_action_answer`) — there's no LLM

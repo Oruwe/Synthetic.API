@@ -110,7 +110,7 @@ _STALL_CORRECTION_HINT = (
 # run reported zero candidates and zero fallback matches, even though
 # the diagnostic's own `nearestClickable` had already correctly IDENTIFIED
 # the right input every single time -- it just never scored a match.
-_MATCH_JS_HELPERS = """
+_MATCH_JS_HELPERS = r"""
     const ownText = (el) => (
         el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("placeholder") || ""
     ).trim();
@@ -131,19 +131,52 @@ _MATCH_JS_HELPERS = """
         ];
         return parts.filter(Boolean).join(" ").toLowerCase();
     };
+    // Generic words that are too common/structural to mean anything on
+    // their own -- excluded from word-level matching below so "field",
+    // "button", "click" etc. (which appear in nearly every reasoning
+    // string AND in unrelated element text) can't manufacture a match.
+    const STOPWORDS = new Set([
+        "this", "that", "with", "from", "into", "will", "should", "click", "clicking",
+        "button", "field", "input", "enter", "entered", "type", "typing", "focus", "form",
+    ]);
     // Returns a match "score" (0 = no match; higher = more specific/
-    // confident) rather than a boolean, so the caller can prefer the
-    // most specific match among several candidates instead of the first
-    // one found.
+    // confident), tiered so a genuine match on what the reasoning is
+    // actually ABOUT always outranks an incidental keyword mentioned in
+    // passing. Found live: reasoning like "The email has been entered,
+    // and clicking the subscribe button will submit it" -- a paraphrase
+    // of the button's real label, not a verbatim quote -- scored 0 on
+    // the button (tier 1 below requires an exact quote) while "email"
+    // happening to appear as unrelated context scored a real (if lower)
+    // semantic match on the EMAIL input (tier 3), so the wrong element
+    // won by default. Tier 2 (word-level overlap) closes that gap.
     const matchScore = (el, reasoningLower) => {
-        // 1) Literal visible-text containment -- a button/link whose own
-        //    label the model's reasoning actually quotes.
         const t = ownText(el).toLowerCase();
-        if (t.length >= 3 && reasoningLower.includes(t)) return t.length;
-        // 2) Semantic field-purpose keyword overlap -- an input referred
+        // 1) Full-string literal containment -- the button/link's ENTIRE
+        //    label quoted verbatim. Strongest, most specific signal.
+        if (t.length >= 3 && reasoningLower.includes(t)) return 10000 + t.length;
+
+        // 2) Word-level overlap -- does the reasoning contain a
+        //    significant word (>=4 chars, not a stopword) that's part of
+        //    THIS element's own visible text? Catches a paraphrase
+        //    ("the subscribe button" vs. the real label "Subscribe to
+        //    continue reading") without matching on trivial/structural
+        //    words shared by nearly every reasoning string.
+        let wordScore = 0;
+        for (const w of t.split(/\s+/)) {
+            if (w.length >= 4 && !STOPWORDS.has(w) && reasoningLower.includes(w)) {
+                wordScore = Math.max(wordScore, w.length);
+            }
+        }
+        if (wordScore > 0) return 100 + wordScore;
+
+        // 3) Semantic field-purpose keyword overlap -- an input referred
         //    to by ROLE ("the email field"), matched against its own
-        //    type/name/id/autocomplete/label, none of which literal
-        //    text-matching above can ever see.
+        //    type/name/id/autocomplete/label, none of which the tiers
+        //    above can ever see (an input's placeholder isn't something
+        //    a model quotes or paraphrases as a "label"). Deliberately
+        //    the LOWEST-priority tier: a keyword merely co-occurring in
+        //    the reasoning is the least specific signal of the three --
+        //    it isn't proof the reasoning is actually ABOUT this element.
         const semantic = semanticTokens(el);
         if (semantic) {
             for (const kw of FIELD_KEYWORDS) {
