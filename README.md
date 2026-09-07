@@ -14,6 +14,11 @@ something relevant appears.
 Built solo for **The Dawn of the Autonomous AI Builder** (Lyzr × Qdrant ×
 Omi), Collaborative Multi-Agent Workflows track.
 
+**🔗 Live demo: [synthetic-api-cg5y.onrender.com](https://synthetic-api-cg5y.onrender.com)**
+— a real, public deployment, not a local-only build. Runs on a free tier
+that sleeps after 15 minutes idle; the first request after that takes
+30-60s to wake up before it responds.
+
 ## Architecture (live path)
 
 ```mermaid
@@ -188,6 +193,21 @@ reasoned about:
   both — one `get_embedder().embed(chunks)` call and one `qdrant.upsert()`
   call per page — plus a 180s node timeout as a safety margin on top of
   that fix, not a substitute for it.
+- **Every headless Chromium launch in this repo now passes
+  `--disable-dev-shm-usage`.** Docker's default `/dev/shm` is 64MB
+  regardless of a container's actual memory limit — a classic
+  Chromium-in-container crash cause (SIGBUS/renderer crashes past a
+  trivial page) that this repo's own `docker-compose.yml` doesn't work
+  around via `shm_size` either, and had gone unnoticed since nothing had
+  yet pushed it hard enough to surface. Fixed once, at the shared
+  `playwright_utils.launched_browser()` every caller goes through
+  (`page_fetcher.py`'s own fallback path had drifted into a separate,
+  un-migrated copy of the launch logic despite that module's docstring
+  claiming otherwise — consolidated in the same change). Most acute on a
+  tight free-tier host: this was found while sizing a 512MB deployment
+  target, and confirmed live afterward — the ambient-RPA path's real
+  Chromium automation ran successfully within that limit on the actual
+  public deployment.
 
 ## Ambient RPA action path (experimental — `feature/ambient-rpa-action-bridge` branch only)
 
@@ -752,7 +772,7 @@ uv sync
 uv run pytest -q
 ```
 
-287 tests, fully offline (no Docker, no network, no API keys) — the DAG
+344 tests, fully offline (no Docker, no network, no API keys) — the DAG
 executor (including genuine multi-threaded concurrency, not simulated),
 chunking, the search/fetch/embed/retrieve pipeline (mocked at the I/O
 boundary), PDF extraction and its content-type/URL-extension detection,
@@ -796,9 +816,19 @@ with each other. It found a real bug the mocked suite couldn't (see
 - `agents/orchestrator/omi_webhook.py` — accepts a couple of plausible Omi
   payload shapes; `parse_omi_payload` is the only place that needs to
   change once the real webhook contract is confirmed.
-- **Tavily itself, and the full `docker compose up` orchestration, have
-  never been run by this assistant** — no Docker daemon and no general
-  outbound internet access in the sandbox this was built in. Everything
-  short of that has been verified (see "Robustness hardening" above); this
-  is the one gap that requires you, on your machine, with a real
-  `TAVILY_API_KEY`.
+- **Tavily itself, and the full `docker compose up` orchestration, were
+  never run by the assistant that built this** — no Docker daemon and no
+  general outbound internet access in the sandbox this was developed in.
+  That gap has since been closed for real, extensively, by the actual
+  operator: `docker compose up --build` run repeatedly against real
+  Tavily results and real sites, both flagship paths (research Q&A and
+  the ambient-RPA/human-in-the-loop pause-resume flow) proven live, and
+  the whole system deployed to a real, public, internet-reachable URL
+  (see "Running it" above) — including surfacing and fixing several real
+  bugs no amount of local reasoning would have caught (a Chromium-in-
+  container crash risk from a missing `--disable-dev-shm-usage` flag; a
+  Docker platform silently routing public traffic to an internal fixture
+  page instead of the real app; a `uv`-managed venv not having `pip`
+  installed). This is the strongest evidence in the whole repo that
+  "reasoned about carefully" and "verified end to end, live, on a public
+  URL" are different claims — and this system has now cleared both.
