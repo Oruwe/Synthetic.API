@@ -126,6 +126,44 @@ def test_decide_next_action_surfaces_the_raw_response_when_kind_is_unrecognized(
     assert "unexpected_field" in step.reasoning
 
 
+def test_decide_next_action_salvages_a_response_with_one_stray_character(monkeypatch, tmp_path):
+    """Regression test using the EXACT raw response captured from a real
+    live run against a real (free-tier) vision model: a decision that
+    was otherwise entirely correct, one stray unclosed "[" away from
+    valid JSON (`"x": [710,` instead of `"x": 710,`). Before the lenient
+    salvage in _lenient_extract_action_fields existed, this fell all the
+    way through to "stuck" and threw away a perfectly good click
+    decision. Smaller/free models slipping like this is common enough
+    that this must not happen."""
+    raw = (
+        '{\n    "kind": "click",\n    "x": [710,\n    "y": 223,\n    '
+        '"reasoning": "Clicking the \'Subscribe\' button will likely initiate the subscription process."\n}'
+    )
+    monkeypatch.setattr(vision_wrapper._vision_agent, "decide_action", lambda image_ref, prompt, *, run_id, node_id: raw)
+
+    step = decide_next_action(str(tmp_path / "shot.png"), "subscribe to the newsletter", [], run_id="r1", node_id="n1")
+
+    assert step.kind == "click"
+    assert step.x == 710
+    assert step.y == 223
+    assert "Subscribe" in step.reasoning
+
+
+def test_decide_next_action_does_not_salvage_a_response_with_no_kind_at_all(monkeypatch, tmp_path):
+    """The salvage path must stay narrow: a response that never mentions
+    a recognizable "kind" key at all (not just malformed near one) must
+    still correctly fall through to "stuck", not fabricate one."""
+    monkeypatch.setattr(
+        vision_wrapper._vision_agent,
+        "decide_action",
+        lambda image_ref, prompt, *, run_id, node_id: "I'm not sure what to do here, this page is confusing.",
+    )
+
+    step = decide_next_action(str(tmp_path / "shot.png"), "buy the item", [], run_id="r1", node_id="n1")
+
+    assert step.kind == "stuck"
+
+
 def test_decide_next_action_falls_back_to_stuck_on_malformed_response(monkeypatch, tmp_path):
     monkeypatch.setattr(
         vision_wrapper._vision_agent,

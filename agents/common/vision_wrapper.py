@@ -11,6 +11,7 @@ vendor's closed multimodal API.
 
 import base64
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -159,6 +160,42 @@ def analyze_screenshot(url: str, title: str, screenshot_path: str, query: str, *
 
 _VALID_ACTION_KINDS = ("click", "type", "scroll", "done", "refused")
 
+# Anchored on the exact field names the action system prompt asks for, so
+# this only ever salvages fields that were plausibly meant for this
+# schema -- never a plausible-looking number from unrelated text.
+_ACTION_FIELD_PATTERNS = {
+    "kind": re.compile(r'"kind"\s*:\s*"(\w+)"'),
+    # The `\[?` tolerates the exact malformation observed live from a
+    # real (free-tier) vision model: `"x": [710,` -- a stray, unclosed
+    # bracket before the number, one character off from valid JSON.
+    "x": re.compile(r'"x"\s*:\s*\[?\s*(-?\d+)'),
+    "y": re.compile(r'"y"\s*:\s*\[?\s*(-?\d+)'),
+    "text": re.compile(r'"text"\s*:\s*"([^"]*)"'),
+    "reasoning": re.compile(r'"reasoning"\s*:\s*"([^"]*)"'),
+}
+
+
+def _lenient_extract_action_fields(raw: str) -> dict:
+    """Best-effort field-by-field salvage for a response that fails
+    strict JSON parsing but is otherwise a perfectly good decision one
+    stray character away from valid -- observed live: a real vision
+    model wrote `"x": [710,` instead of `"x": 710,`, which sent an
+    entirely correct click decision through _parse_json_response's
+    except-branch and into "stuck". Smaller/free models slipping like
+    this is common enough that discarding a good decision over one
+    misplaced bracket is wasteful. Anchored, per-field regexes only fill
+    in what they can confidently find -- a response that isn't
+    JSON-shaped at all (no `"kind": "..."` anywhere) still yields {},
+    correctly falling through to "stuck" same as before this existed.
+    """
+    result: dict = {}
+    for field, pattern in _ACTION_FIELD_PATTERNS.items():
+        match = pattern.search(raw)
+        if match is None:
+            continue
+        result[field] = int(match.group(1)) if field in ("x", "y") else match.group(1)
+    return result
+
 
 def decide_next_action(
     screenshot_path: str, intent: str, history: list[ActionStep], *, run_id: str, node_id: str
@@ -182,6 +219,16 @@ def decide_next_action(
     try:
         raw = _vision_agent.decide_action(screenshot_path, prompt, run_id=run_id, node_id=node_id)
         parsed = _parse_json_response(raw)
+        if parsed.get("kind") not in _VALID_ACTION_KINDS:
+            # Strict parsing didn't yield a usable "kind" -- before
+            # giving up, try a lenient field-by-field salvage on the
+            # SAME raw text. Only swap in the salvaged fields if they
+            # actually produce a valid kind; otherwise fall through to
+            # the unrecognized-kind handling below exactly as before.
+            salvaged = _lenient_extract_action_fields(raw)
+            if salvaged.get("kind") in _VALID_ACTION_KINDS:
+                logger.info("vision_decide_action_salvaged_from_malformed_json", kind=salvaged.get("kind"))
+                parsed = salvaged
         kind = parsed.get("kind")
         if kind not in _VALID_ACTION_KINDS:
             # Logging just `kind` was useless for diagnosing WHY a response
