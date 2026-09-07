@@ -33,7 +33,9 @@ h1 {
   margin-bottom: 8px;
 }
 
-input[type="text"] {
+input[type="text"],
+input[type="email"],
+input[type="password"] {
   width: 260px;
   height: 36px;
   font-size: 15px;
@@ -41,6 +43,7 @@ input[type="text"] {
   border: 1px solid #cbd2d9;
   border-radius: 6px;
   margin-right: 8px;
+  margin-bottom: 8px;
 }
 
 button {
@@ -86,4 +89,20 @@ hr {
   border: none;
   border-top: 1px solid #e2e4e9;
   margin: 28px 0;
+}
+
+.block.gate {
+  background: #fafbfc;
+  border: 1px dashed #cbd2d9;
+  border-radius: 8px;
+  padding: 16px 20px;
+}
+
+.block a {
+  color: #0969da;
+  text-decoration: none;
+}
+
+.block a:hover {
+  text-decoration: underline;
 }

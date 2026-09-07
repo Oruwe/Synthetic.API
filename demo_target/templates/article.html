@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Northwind Weekly — Article</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="card">
+    <h1>Northwind Weekly</h1>
+    <p class="subtitle"><a href="/">&larr; back</a></p>
+
+    {% if unlocked %}
+      <section class="block">
+        <h2>Full story</h2>
+        <p data-testid="article-full-text">{{ full_text }}</p>
+      </section>
+    {% else %}
+      <section class="block gate">
+        <h2>Breakthrough announced</h2>
+        <p data-testid="article-teaser">{{ teaser }}</p>
+        <form method="post" action="/article/subscribe" data-testid="article-gate-form">
+          <input type="email" id="gate-email" name="email" placeholder="you@example.com" data-testid="article-gate-email" autocomplete="off" required>
+          <button type="submit" id="gate-submit-btn" data-testid="article-gate-submit">Subscribe to continue reading</button>
+        </form>
+      </section>
+    {% endif %}
+  </div>
+</body>
+</html>

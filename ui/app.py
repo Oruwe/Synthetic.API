@@ -1,11 +1,11 @@
 """Minimal demo UI for Synthetic.API.
 
 Purely additive: this only calls the Orchestrator's existing HTTP API
-(/trigger, /runs/{id}) over the network -- no direct access to Qdrant,
-run_store, or anything else -- so it carries zero risk to the pipeline
-that's already proven to work. It exists because curl/bash scripts are
-fine for development but not a great surface for a judge or a live demo
-audience.
+(/trigger, /runs/{id}, /runs/{id}/resume) over the network -- no direct
+access to Qdrant, run_store, or anything else -- so it carries zero risk to
+the pipeline that's already proven to work. It exists because curl/bash
+scripts are fine for development but not a great surface for a judge or a
+live demo audience.
 
 Voice, honestly:
 - STT (speech-to-text) isn't something this UI needs to do. In the real
@@ -19,6 +19,16 @@ Voice, honestly:
   native SpeechSynthesis API client-side -- zero backend, zero new
   dependency, and it actually works today. See README's "Voice & UI"
   section for the reasoning.
+
+Human-in-the-loop (feature/ambient-rpa-action-bridge): a run can come back
+with overall_status "awaiting_human_input" when the Web-Researcher hits a
+login/subscribe wall on the only source that answers the question (see
+agents/common/models/dag.py's PendingInputRequest docstring for the full
+security story). This UI surfaces that as an inline email/password prompt
+and POSTs the answer to /runs/{run_id}/resume -- it never stores, logs, or
+does anything with the password beyond that one POST; Gradio's own state
+(`run_id_state`) carries only the run_id across the pause, never the
+credential.
 """
 
 import os
@@ -33,6 +43,12 @@ _POLL_INTERVAL_SECONDS = 3.0
 # orchestrator/planner.py), so this needs enough headroom above that plus
 # fetch + the drafting LLM call itself for a real, non-trivial question.
 _MAX_WAIT_SECONDS = 300
+
+# Reused wherever a yield needs to hide the human-input group and leave its
+# fields untouched -- most polling ticks do exactly this, so spelling it out
+# every time would bury the one branch that actually matters (the gate
+# itself) in repetition.
+_GATE_HIDDEN = gr.update(visible=False)
 
 
 def _format_sources_markdown(sources: list[dict], sources_attempted, sources_succeeded) -> str:
@@ -60,41 +76,18 @@ def _format_sources_markdown(sources: list[dict], sources_attempted, sources_suc
     return "\n".join(lines)
 
 
-def ask(question: str):
-    question = (question or "").strip()
-    if not question:
-        yield "Type a question first.", "", ""
-        return
+def _poll_until_done_or_gate(run_id: str, waited: float = 0.0):
+    """Shared polling loop used by both ask() and resume_gate() -- picking
+    up an in-flight run and following it to one of three outcomes: a real
+    answer, a timeout, or a pause for human input. Each yield is the full
+    8-output tuple the Blocks wiring below expects (see its outputs= list):
+    (status_md, answer, sources_md, gate_group_visible, gate_prompt,
+    gate_email_update, gate_password_update, run_id).
 
-    yield "🔎 Sending your question to the Orchestrator...", "", ""
-
-    try:
-        resp = requests.post(f"{ORCHESTRATOR_URL}/trigger", json={"transcript": question}, timeout=10)
-        resp.raise_for_status()
-    except Exception as exc:  # noqa: BLE001 - show the real error, don't crash the UI
-        yield f"⚠️ Could not reach the Orchestrator at {ORCHESTRATOR_URL}: {exc}", "", ""
-        return
-
-    body = resp.json()
-    run_id = body.get("run_id")
-    if not run_id:
-        yield f"⚠️ Unexpected response from Orchestrator: {body}", "", ""
-        return
-
-    yield f"🛰️ Run `{run_id}` started — searching the web, fetching pages, and embedding...", "", ""
-
-    # The DAG (fetch -> embed) finishing and the Synthesizer actually
-    # drafting an answer are two SEPARATE, asynchronous steps: the
-    # Orchestrator marks overall_status "completed" the instant the DAG
-    # itself is done, but the Synthesizer only notices and starts drafting
-    # on its own next poll cycle (every ~5s, see watcher.py) and then the
-    # LLM call itself still takes real time. Caught live: this loop used
-    # to stop the moment overall_status went terminal and report "no
-    # answer was recorded" if the Synthesizer simply hadn't caught up yet
-    # -- not a real failure, just polling for the wrong signal. Now it
-    # keeps polling for the answer specifically, using the DAG's terminal
-    # status only to change the status message, not to stop early.
-    waited = 0.0
+    Split out from ask() once resume_gate() needed to keep polling the SAME
+    run past a pause -- duplicating this loop would have meant two places
+    to keep in sync on every future change to how a run's status is read.
+    """
     dag_finished_status: str | None = None
     while waited < _MAX_WAIT_SECONDS:
         time.sleep(_POLL_INTERVAL_SECONDS)
@@ -102,8 +95,8 @@ def ask(question: str):
         try:
             run_resp = requests.get(f"{ORCHESTRATOR_URL}/runs/{run_id}", timeout=10)
             run_resp.raise_for_status()
-        except Exception as exc:  # noqa: BLE001
-            yield f"⚠️ Lost contact polling the run: {exc}", "", ""
+        except Exception as exc:  # noqa: BLE001 - show the real error, don't crash the UI
+            yield f"⚠️ Lost contact polling the run: {exc}", "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, run_id
             return
 
         run = run_resp.json()
@@ -116,7 +109,27 @@ def ask(question: str):
             sources_md = _format_sources_markdown(
                 run.get("sources") or [], run.get("sources_attempted"), run.get("sources_succeeded")
             )
-            yield f"✅ Done (`{status}`, {waited:.0f}s elapsed).", answer_text, sources_md
+            yield (
+                f"✅ Done (`{status}`, {waited:.0f}s elapsed).", answer_text, sources_md,
+                _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, run_id,
+            )
+            return
+
+        if status == "awaiting_human_input":
+            # The run has stopped itself and persisted -- there is no live
+            # thread to keep polling here, so this generator simply ends;
+            # gate_continue_btn.click(resume_gate, ...) below is what wakes
+            # the run back up when the human answers.
+            pending = run.get("pending_input") or {}
+            fields = pending.get("fields") or []
+            prompt = pending.get("prompt") or "This source needs more information to continue."
+            yield (
+                f"✋ Run `{run_id}` is paused — it needs your input to get past a login/subscribe wall.",
+                "", "",
+                gr.update(visible=True), prompt,
+                gr.update(visible=True), gr.update(visible="password" in fields, value=""),
+                run_id,
+            )
             return
 
         if dag_finished_status is None and status in ("completed", "failed", "circuit_broken", "no_capability"):
@@ -126,18 +139,95 @@ def ask(question: str):
             yield (
                 f"⏳ Search/fetch/embed finished (`{dag_finished_status}`) — waiting for the "
                 f"Synthesizer to draft the answer... ({waited:.0f}s elapsed)",
-                "",
-                "",
+                "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, run_id,
             )
         else:
-            yield f"⏳ Still working... (`{status}`, {waited:.0f}s elapsed)", "", ""
+            yield f"⏳ Still working... (`{status}`, {waited:.0f}s elapsed)", "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, run_id
 
     yield (
         f"⚠️ Timed out after {_MAX_WAIT_SECONDS}s waiting for run `{run_id}`'s answer — "
         f"check `docker compose logs agents-synthesizer` or poll `/runs/{run_id}` directly.",
-        "",
-        "",
+        "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, run_id,
     )
+
+
+def ask(question: str):
+    question = (question or "").strip()
+    if not question:
+        yield "Type a question first.", "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, None
+        return
+
+    yield "🔎 Sending your question to the Orchestrator...", "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, None
+
+    try:
+        resp = requests.post(f"{ORCHESTRATOR_URL}/trigger", json={"transcript": question}, timeout=10)
+        resp.raise_for_status()
+    except Exception as exc:  # noqa: BLE001 - show the real error, don't crash the UI
+        yield f"⚠️ Could not reach the Orchestrator at {ORCHESTRATOR_URL}: {exc}", "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, None
+        return
+
+    body = resp.json()
+    run_id = body.get("run_id")
+    if not run_id:
+        yield f"⚠️ Unexpected response from Orchestrator: {body}", "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, None
+        return
+
+    yield f"🛰️ Run `{run_id}` started — searching the web, fetching pages, and embedding...", "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, run_id
+
+    # The DAG (fetch -> embed) finishing and the Synthesizer actually
+    # drafting an answer are two SEPARATE, asynchronous steps: the
+    # Orchestrator marks overall_status "completed" the instant the DAG
+    # itself is done, but the Synthesizer only notices and starts drafting
+    # on its own next poll cycle (every ~5s, see watcher.py) and then the
+    # LLM call itself still takes real time. Caught live: this loop used
+    # to stop the moment overall_status went terminal and report "no
+    # answer was recorded" if the Synthesizer simply hadn't caught up yet
+    # -- not a real failure, just polling for the wrong signal. It now
+    # keeps polling for the answer specifically (or a pause) via the
+    # shared helper above, using the DAG's terminal status only to change
+    # the status message, not to stop early.
+    yield from _poll_until_done_or_gate(run_id)
+
+
+def resume_gate(run_id: str | None, email: str, password: str):
+    """Wired to gate_continue_btn.click(). Sends whatever the human typed
+    straight to POST /runs/{run_id}/resume and nowhere else -- this
+    function's own local `password` variable goes out of scope the moment
+    it returns, and the field is cleared in every yield below so a
+    plaintext password never lingers in the page's rendered state past the
+    one request that needed it."""
+    if not run_id:
+        yield (
+            "⚠️ No paused run to resume — ask a question first.", "", "",
+            _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, run_id,
+        )
+        return
+
+    payload = {}
+    if email and email.strip():
+        payload["email"] = email.strip()
+    if password:
+        payload["password"] = password
+
+    try:
+        resp = requests.post(f"{ORCHESTRATOR_URL}/runs/{run_id}/resume", json=payload, timeout=10)
+        resp.raise_for_status()
+    except requests.HTTPError as exc:
+        detail = exc.response.json().get("detail", str(exc)) if exc.response is not None else str(exc)
+        yield (
+            f"⚠️ Could not resume run `{run_id}`: {detail}", "", "",
+            gr.update(visible=True), "", gr.update(visible=True), gr.update(value=""), run_id,
+        )
+        return
+    except Exception as exc:  # noqa: BLE001 - show the real error, don't crash the UI
+        yield (
+            f"⚠️ Could not reach the Orchestrator at {ORCHESTRATOR_URL}: {exc}", "", "",
+            gr.update(visible=True), "", gr.update(visible=True), gr.update(value=""), run_id,
+        )
+        return
+
+    yield f"▶️ Continuing run `{run_id}`...", "", "", _GATE_HIDDEN, "", gr.update(value=""), gr.update(value=""), run_id
+    yield from _poll_until_done_or_gate(run_id)
 
 
 _READ_ALOUD_JS = """
@@ -163,14 +253,34 @@ with gr.Blocks(title="Synthetic.API") as demo:
     )
     ask_button = gr.Button("Ask", variant="primary")
     status_box = gr.Markdown()
+
+    # Hidden until a run actually pauses on a gated source. See this
+    # file's module docstring and PendingInputRequest (dag.py) for why the
+    # password field only ever leaves the browser in the one POST below.
+    with gr.Group(visible=False) as human_input_group:
+        gate_prompt_md = gr.Markdown()
+        gate_email_box = gr.Textbox(label="Email", placeholder="you@example.com")
+        gate_password_box = gr.Textbox(label="Password", type="password", visible=False)
+        gate_continue_btn = gr.Button("Continue", variant="primary")
+
+    run_id_state = gr.State(value=None)
+
     # Only the clean answer text lives here now -- no "Sources used: ..."
     # footer mixed in, so "Read answer aloud" below doesn't recite URLs.
     answer_box = gr.Textbox(label="Answer", lines=8, interactive=False)
     sources_box = gr.Markdown()
     read_aloud_button = gr.Button("🔊 Read answer aloud")
 
-    ask_button.click(ask, inputs=question_box, outputs=[status_box, answer_box, sources_box])
-    question_box.submit(ask, inputs=question_box, outputs=[status_box, answer_box, sources_box])
+    _ask_outputs = [
+        status_box, answer_box, sources_box,
+        human_input_group, gate_prompt_md, gate_email_box, gate_password_box,
+        run_id_state,
+    ]
+    ask_button.click(ask, inputs=question_box, outputs=_ask_outputs)
+    question_box.submit(ask, inputs=question_box, outputs=_ask_outputs)
+    gate_continue_btn.click(
+        resume_gate, inputs=[run_id_state, gate_email_box, gate_password_box], outputs=_ask_outputs
+    )
     read_aloud_button.click(None, inputs=answer_box, outputs=None, js=_READ_ALOUD_JS)
 
 if __name__ == "__main__":

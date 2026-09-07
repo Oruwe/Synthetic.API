@@ -334,6 +334,14 @@ new `docker-compose.yml` service) with two flows on one page:
   backstop, which must block the click before it ever reaches this page
   (there's intentionally nothing behind the button — refusing to click it
   IS the test).
+- **`/article`** — a short teaser plus "Subscribe to continue reading"
+  until an email is given. The fixture for the email-only half of the
+  human-in-the-loop gated-content path below.
+- **`/members`** — a "Sign in to continue" wall in front of a member
+  briefing, gated behind a throwaway demo account (`demo@example.com` /
+  `demo123`, printed openly in `demo_target/app.py` — it's a fixture
+  account with nothing real behind it). The fixture for that path's
+  login (email **and** password) half.
 
 This is the intended target for both the actual hackathon demo and for
 validating the vision model's real judgment — which could not be verified
@@ -359,6 +367,110 @@ against this exact fixture, with the vision-model call stubbed to a
 scripted decision sequence (mirroring how the real vision loop's own unit
 tests mock it) — confirmed genuine, not by construction, by checking the
 resulting screenshot for the actual typed text and confirmation banner.
+
+## Human-in-the-loop gated content: pause, ask, resume (`feature/ambient-rpa-action-bridge` only)
+
+The research path (`fetch_pages` → `embed_pages`) answers questions from
+whatever the web already shows it. Some of the web doesn't show anything
+until a human logs in or subscribes — and until this feature, a source
+like that was just a failed fetch, silently dropped from the answer even
+when it was the *only* source that actually had what was asked for. This
+closes that gap: when the only usable candidate for a question turns out
+to be gated, the run pauses, asks a person for exactly what's needed, and
+resumes — through the same DAG executor, same run, same node — the moment
+it's answered.
+
+```
+fetch_pages: fetches candidate pages
+    ├── real content found (here or elsewhere among the candidates)
+    │      → proceed to embed_pages as before, nothing changes
+    └── the ONLY usable candidate is gated (page_fetcher._detect_gate_phrase
+           recognized "sign in to continue" / "subscribe to read" / etc.
+           on a page with too little real content to already answer the
+           question)
+           → raise AwaitingHumanInputError → executor.py marks the run
+             overall_status="awaiting_human_input", persists a
+             PendingInputRequest (which field(s), a human-readable prompt,
+             the gated URL) — the background task returns; nothing is
+             left running or blocked in memory
+           → a human answers via POST /runs/{run_id}/resume (or the demo
+             UI's inline prompt) with email and/or password
+           → resume_plan() reloads the persisted run, re-enters the DAG
+             walk at exactly the paused node, and fetch_pages uses the
+             SAME ambient RPA action engine (and its SAME safety rails --
+             the payment guard, the step ceiling, the screenshot audit
+             trail) already proven above to get past the gate and read
+             what was behind it, in one continuous browser session
+```
+
+**Why a real pause, not a client-side retry loop.** The whole point is
+that only a human has the answer — there is nothing to compute or infer
+from more search results. Persisting the pause as durable `RunState`
+(rather than, say, blocking a request thread or holding an in-memory
+generator open) means the run survives the orchestrator process
+restarting, a request timing out, or a person taking an hour to come back
+— `resume_plan()` doesn't need anything alive from the original attempt
+except what's on disk.
+
+**The password never becomes a liability, by construction, not by
+promise** — this is the one place in the whole system that ever asks for
+a credential, and it's scoped and handled accordingly (see
+`PendingInputRequest`'s docstring in `agents/common/models/dag.py` for the
+full reasoning):
+
+- **Scoped to `demo_target` only.** This never drives a real third-party
+  login. The UI and API accept `email`/`password` generically, but nothing
+  in this codebase points the action engine at a site other than the
+  self-hosted fixture above.
+- **Never persisted.** `RunState.human_provided_inputs` (the field that
+  *is* written to `data/runs/<run_id>.json` as plain JSON so a resumed
+  node can find what was answered) gets the email only. The password lives
+  solely in the in-memory `RunContext` for the single `resume_plan()` call
+  that uses it, then is garbage-collected — proven directly by
+  `test_resume_plan_persists_email_but_never_password`, which reloads the
+  run from disk after resuming and asserts the raw password string is
+  nowhere in it.
+- **Never sent to the vision model.** `execute_login_and_extract`
+  (`action_executor.py`) only ever asks the model a credential-free
+  question — "where is the password field" — reusing the exact same
+  `decide_next_action()` call (and payment guard) as every other click
+  decision in this system. The actual keystrokes happen directly in
+  Playwright code, `page.keyboard.type(value)`, with a value the model was
+  never shown and never told.
+- **Never logged, never in the audit trail.** The `ActionStep` recorded
+  for a password field is built manually with `text="[REDACTED]"` — never
+  returned by the model itself, so it can never leak into a later
+  model-facing prompt (`history`) either. Server logs record which
+  *fields* were supplied (`fields=["email","password"]`), never values.
+
+Wired end to end: `POST /runs/{run_id}/resume` (`agents/orchestrator/main.py`,
+400/404/409 on a malformed/missing/not-actually-paused request) and the
+Gradio demo UI (`ui/app.py`) both surface this — a paused run shows an
+inline prompt (a password box only when the gate actually needs one) and
+resumes the same run on submit, using `gr.State` to carry the `run_id`
+across the pause without ever holding the credential in component state
+past the one POST that needs it.
+
+`scripts/live_test_gated_content.py` runs the real thing — real vision
+model, real Chromium, real DAG pause/persist/resume, against
+`demo_target`'s `/article` (email gate) and `/members` (login gate) — for
+the same reason `live_test_action_loop.py` exists: this sandbox's network
+policy blocks `openrouter.ai`, so the vision model's own judgment here
+could only be proven live, not from inside it.
+
+```bash
+docker compose up -d demo_target
+uv run python scripts/live_test_gated_content.py                 # email-only gate: /article
+uv run python scripts/live_test_gated_content.py --page members  # login gate: /members
+```
+
+It drives `execute_plan`/`resume_plan` directly against a hand-built
+one-node plan (bypassing Tavily search, same as `live_test_action_loop.py`
+bypasses it for the action path) — proving the real pause → persist →
+resume cycle itself, not just the already-mocked-tested gate-detection and
+action-executor pieces — and reloads the run from disk afterward to check
+live, not just in a test, that the password never made it into
+persisted state.
 
 ## What's dormant (kept, not deleted, not live)
 
@@ -422,12 +534,14 @@ ui/
   app.py                   Gradio demo UI -- calls the Orchestrator's HTTP API only,
                           see "Voice & UI" below
 demo_target/               (feature/ambient-rpa-action-bridge branch) safe, self-hosted
-                          Flask fixture for the action path to act on -- see that
-                          section above
+                          Flask fixture for the action path to act on, incl. /article
+                          and /members gated-content pages -- see that section above
 scripts/
-  live_test_action_loop.py (feature/ambient-rpa-action-bridge branch) runs the REAL
+  live_test_action_loop.py   (feature/ambient-rpa-action-bridge branch) runs the REAL
                           vision loop against demo_target, wherever OPENROUTER_API_KEY
                           is actually reachable
+  live_test_gated_content.py (feature/ambient-rpa-action-bridge branch) runs the REAL
+                          pause/resume cycle against demo_target's gated pages
 ```
 
 ## Running it
@@ -514,15 +628,19 @@ uv sync
 uv run pytest -q
 ```
 
-151 tests, fully offline (no Docker, no network, no API keys) — the DAG
+287 tests, fully offline (no Docker, no network, no API keys) — the DAG
 executor (including genuine multi-threaded concurrency, not simulated),
 chunking, the search/fetch/embed/retrieve pipeline (mocked at the I/O
 boundary), PDF extraction and its content-type/URL-extension detection,
 retention/pruning, readiness checks, the indexed watcher, the Synthesizer
-persisting its drafted answer back onto the run, and the real Lyzr SDK
+persisting its drafted answer back onto the run, the real Lyzr SDK
 integration (its response-shape parsing, session_id threading, and
-fallback-on-failure behavior) are all exercised. The dormant pipelines'
-tests still run too (nothing about them broke).
+fallback-on-failure behavior), the ambient RPA action loop and its
+memory/replay layer (`feature/ambient-rpa-action-bridge` branch), and the
+human-in-the-loop pause/resume path above — including a direct proof that
+a resumed run's password never makes it into persisted `RunState` JSON or
+server logs — are all exercised. The dormant pipelines' tests still run
+too (nothing about them broke).
 
 Plus 5 opt-in tests against a **real** local HTTP server and a **real**
 headless Chromium — no mocking of httpx, trafilatura, or Playwright:

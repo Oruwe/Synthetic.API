@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Northwind Weekly — Members</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="card">
+    <h1>Northwind Weekly</h1>
+    <p class="subtitle"><a href="/">&larr; back</a></p>
+
+    {% if logged_in %}
+      <section class="block">
+        <h2>Member briefing</h2>
+        <p data-testid="members-content">{{ content }}</p>
+      </section>
+    {% else %}
+      <section class="block gate">
+        <h2>Members only</h2>
+        <p data-testid="members-teaser">{{ teaser }}</p>
+        {% if error %}
+          <p class="note" data-testid="members-login-error">{{ error }}</p>
+        {% endif %}
+        <form method="post" action="/members/login" data-testid="members-login-form">
+          <input type="email" id="login-email" name="email" placeholder="you@example.com" data-testid="members-login-email" autocomplete="off" required>
+          <input type="password" id="login-password" name="password" placeholder="password" data-testid="members-login-password" autocomplete="off" required>
+          <button type="submit" id="login-submit-btn" data-testid="members-login-submit">Sign in</button>
+        </form>
+      </section>
+    {% endif %}
+  </div>
+</body>
+</html>
