@@ -393,7 +393,7 @@ def test_execute_step_snaps_a_click_onto_a_nearby_clickable_element(tmp_path, mo
     action_executor.execute_action_loop("do the thing", "https://example.test", run_id="r1")
 
     assert page.mouse.clicks == [(650.0, 410.0)]
-    assert page.evaluate_calls == [[640.0, 400.0, action_executor._CLICK_SNAP_RADIUS_PX]]
+    assert page.evaluate_calls == [[640.0, 400.0, action_executor._CLICK_SNAP_RADIUS_PX, "click the button"]]
 
 
 def test_execute_step_does_not_move_a_click_already_on_a_clickable_element(tmp_path, monkeypatch):

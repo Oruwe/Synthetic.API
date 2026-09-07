@@ -405,7 +405,7 @@ def extract_visible_text(page) -> str:
 _CLICK_SNAP_RADIUS_PX = 60
 
 _SNAP_TO_CLICKABLE_JS = """
-([x, y, radius]) => {
+([x, y, radius, reasoning]) => {
     const isClickable = (el) => {
         if (!el) return false;
         if (["BUTTON", "A", "INPUT", "TEXTAREA", "SELECT", "LABEL"].includes(el.tagName)) return true;
@@ -413,46 +413,84 @@ _SNAP_TO_CLICKABLE_JS = """
         if (role && ["button", "link", "checkbox", "radio", "tab"].includes(role)) return true;
         return window.getComputedStyle(el).cursor === "pointer";
     };
-    if (isClickable(document.elementFromPoint(x, y))) return null;  // already on target, don't touch it
+    const ownText = (el) => (
+        el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("placeholder") || ""
+    ).trim();
 
-    const candidates = document.querySelectorAll(
+    const direct = document.elementFromPoint(x, y);
+    const candidates = Array.from(document.querySelectorAll(
         "button, a, input, textarea, select, [role=button], [role=link], [onclick]"
-    );
-    let best = null;
-    let bestDist = radius;
-    for (const el of candidates) {
+    )).map(el => {
         const rect = el.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) continue;
+        if (rect.width === 0 || rect.height === 0) return null;
         const cx = rect.left + rect.width / 2;
         const cy = rect.top + rect.height / 2;
-        const dist = Math.hypot(cx - x, cy - y);
-        if (dist < bestDist) {
-            bestDist = dist;
-            best = [cx, cy];
+        return {el, cx, cy, dist: Math.hypot(cx - x, cy - y)};
+    }).filter(c => c && c.dist <= radius);
+
+    if (candidates.length === 0) return null;
+
+    // Prefer whichever nearby candidate's own visible text/label the
+    // model's reasoning actually quotes -- the model very often names
+    // exactly what it means to click (e.g. "Clicking the 'Subscribe to
+    // continue reading' button"). Raw pixel proximity alone can't
+    // disambiguate two clickable elements only a few pixels apart (e.g.
+    // an input immediately above a submit button) -- this can, since it
+    // uses a signal the model already gave us, not just geometry.
+    const reasoningLower = (reasoning || "").toLowerCase();
+    let chosen = null;
+    if (reasoningLower) {
+        let bestLen = 0;
+        for (const c of candidates) {
+            const t = ownText(c.el).toLowerCase();
+            if (t.length >= 3 && reasoningLower.includes(t) && t.length > bestLen) {
+                chosen = c;
+                bestLen = t.length;
+            }
         }
     }
-    return best;
+    if (!chosen) {
+        chosen = candidates.reduce((best, c) => (!best || c.dist < best.dist) ? c : best, null);
+    }
+
+    if (chosen.el === direct) return null;  // already exactly on the chosen target, don't touch it
+    return [chosen.cx, chosen.cy];
 }
 """
 
 
-def _snap_to_clickable(page, x: float, y: float) -> tuple[float, float]:
+def _snap_to_clickable(page, x: float, y: float, reasoning: str | None = None) -> tuple[float, float]:
     """Nudges a click/focus target onto the nearest real clickable element
-    when the model's coordinate guess landed on dead space instead of it.
+    when the model's coordinate guess landed on the wrong spot.
 
-    Found live: a manual browser test proved demo_target's gate forms
-    work fine end to end, which isolated a live run's repeated failed
-    "submit" clicks (same reasoning, same non-progress, every attempt) to
-    vision-grounding pixel imprecision in the model's own coordinate
-    guess -- not a page bug, and not something a navigation-timing fix
-    could touch. The model still does 100% of the visual reasoning (what
-    to click and roughly where); this only makes EXECUTION forgiving of a
-    modest miss, the same way a real mouse click a few pixels off a
-    button's edge still usually "counts" for a human. It only ever moves
-    a click that missed -- document.elementFromPoint at the model's exact
-    coordinate already being clickable returns null (no nudge) rather
-    than risk relocating an already-correct click onto some other nearby
-    control.
+    Found live, in two rounds: a manual browser test proved demo_target's
+    gate forms work fine end to end, which isolated a live run's repeated
+    failed "submit" clicks (same reasoning, same non-progress, every
+    attempt) to the model's own coordinate guess -- not a page bug, and
+    not the navigation-timing race an earlier fix addressed. The FIRST
+    version of this function (raw nearest-clickable-within-radius, only
+    triggered when the exact point wasn't already on something clickable)
+    still failed the exact same way: demo_target's email input and submit
+    button sit only ~8px apart, so a guess landing a few pixels high
+    inside the email input's own box was *already* "on something
+    clickable" by that check -- just the WRONG clickable element -- and
+    the old logic left it there. Reproduced and fixed against a local
+    replica of that exact layout before shipping this: the model's own
+    `reasoning` almost always names its real target by its visible label
+    ("Clicking the 'Subscribe to continue reading' button..."), so this
+    version prefers whichever nearby candidate's own text the reasoning
+    actually quotes over raw proximity, which is what correctly
+    disambiguates two controls sitting a few pixels apart. Falls back to
+    nearest-by-distance when reasoning doesn't name anything nearby (e.g.
+    a plain focus click on an unlabeled field), same as before.
+
+    The model still does 100% of the visual reasoning (what to click and
+    roughly where, and now implicitly its label too, via reasoning it
+    already produces for its own purposes) -- this only makes EXECUTION
+    forgiving of a modest miss, the same way a real mouse click a few
+    pixels off a button's edge still usually "counts" for a human. An
+    already-correct click is never moved: only a miss (or a click that
+    landed on the wrong nearby element) triggers a search.
 
     Silently falls back to the original coordinates on ANY failure (a
     fake Page in tests with no .evaluate, a cross-origin frame, anything
@@ -460,7 +498,7 @@ def _snap_to_clickable(page, x: float, y: float) -> tuple[float, float]:
     click to proceed.
     """
     try:
-        snapped = page.evaluate(_SNAP_TO_CLICKABLE_JS, [x, y, _CLICK_SNAP_RADIUS_PX])
+        snapped = page.evaluate(_SNAP_TO_CLICKABLE_JS, [x, y, _CLICK_SNAP_RADIUS_PX, reasoning])
     except Exception:  # noqa: BLE001 - best-effort only, see docstring
         return x, y
     if snapped and len(snapped) == 2:
@@ -480,11 +518,11 @@ def _execute_step(page, step: ActionStep) -> None:
     if step.kind == "click":
         if real_x is None:
             raise ValueError("click action missing coordinates")
-        real_x, real_y = _snap_to_clickable(page, real_x, real_y)
+        real_x, real_y = _snap_to_clickable(page, real_x, real_y, step.reasoning)
         page.mouse.click(real_x, real_y)
     elif step.kind == "type":
         if real_x is not None:
-            real_x, real_y = _snap_to_clickable(page, real_x, real_y)
+            real_x, real_y = _snap_to_clickable(page, real_x, real_y, step.reasoning)
             page.mouse.click(real_x, real_y)  # focus the target field first
         page.keyboard.type(step.text or "")
     elif step.kind == "scroll":

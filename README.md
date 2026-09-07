@@ -310,23 +310,32 @@ lightly applied here.
   with `max_retries=1` — unlike an HTTP fetch, a click/type on a real page
   is not idempotent; a node-level retry could resubmit an action the first
   attempt already performed for real.
-- **Click execution forgives a modest vision-grounding miss.** Found
-  live: a real vision model's own click-coordinate estimate can land a
-  few pixels off a small button, and a raw `page.mouse.click()` at that
-  exact point then hits dead space — the page never reacts, and the model,
-  seeing an unchanged screenshot, just repeats the same "click submit"
-  reasoning until the step ceiling is hit (confirmed live against
+- **Click execution forgives a modest vision-grounding miss, using the
+  model's own reasoning to disambiguate.** Found live, in two rounds: a
+  real vision model's click-coordinate estimate can land a few pixels off
+  its intended target, and a raw `page.mouse.click()` at that exact point
+  then hits the wrong element — the page never reacts as expected, and
+  the model, seeing an unchanged screenshot, just repeats the same "click
+  submit" reasoning until the step ceiling is hit (confirmed live against
   `demo_target`'s `/article` gate; a manual browser test proved the page
-  itself was never the problem). `_snap_to_clickable` in
-  `action_executor.py` mitigates this at execution time, not by changing
-  what the model reasons about: if the model's exact coordinate isn't
-  already on a clickable element, it searches a small radius for the
-  nearest real one (button/link/input/anything with `cursor: pointer`)
-  and clicks that instead — the same tolerance a human's own
-  slightly-off click usually gets away with. An already-correct click is
-  never moved (only a miss triggers the search), and any failure in the
-  snap itself (a fake page in tests, a cross-origin frame) falls back to
-  the model's raw coordinates rather than blocking the step.
+  itself was never the problem). The first fix — snap to the nearest
+  clickable element within a small radius, but only when the exact
+  coordinate wasn't *already* on something clickable — still failed the
+  identical way: `demo_target`'s email input and submit button sit only
+  ~8px apart, so a guess landing a few pixels high inside the email
+  input's own box was already "on something clickable," just the *wrong*
+  one, and got left there. `_snap_to_clickable` in `action_executor.py`
+  now also uses the model's own stated `reasoning` to pick between nearby
+  candidates: the model very often names exactly what it means to click
+  ("Clicking the 'Subscribe to continue reading' button…"), so a nearby
+  candidate whose own visible label the reasoning actually quotes wins
+  over one that's merely closer in pixels — reproduced and verified
+  against a local replica of the exact failing layout before shipping.
+  Falls back to nearest-by-distance when reasoning doesn't name anything
+  nearby (a plain focus click on an unlabeled field). An already-correct
+  click is still never moved, and any failure in the snap itself (a fake
+  page in tests, a cross-origin frame) falls back to the model's raw
+  coordinates rather than blocking the step.
 
 Reports its outcome directly onto `RunState.answer`/`answer_text` once the
 DAG finishes (`executor.py`'s `_compose_action_answer`) — there's no LLM
