@@ -22,7 +22,7 @@
 # has not been confirmed to fit (build-time or run-time) from either
 # sandbox available while writing this; SETUP.md's verification step is
 # the actual test, not a formality.
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
