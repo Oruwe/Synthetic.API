@@ -447,6 +447,66 @@ def test_execute_step_click_survives_evaluate_raising(tmp_path, monkeypatch):
     assert page.mouse.clicks == [(640.0, 400.0)]  # fell back to the raw coordinates
 
 
+def test_execute_step_logs_when_the_snap_evaluate_call_fails(tmp_path, monkeypatch, capsys):
+    """Two live rounds of "the fix should work but the exact same failure
+    kept recurring" had no way to tell, from the run's OWN logs, whether
+    _snap_to_clickable was even reaching page.evaluate successfully on
+    the user's real environment -- it silently swallowed every exception.
+    This is the fix for that blind spot: a failure must be visible in the
+    run's logs, not just invisible inside a try/except.
+
+    Uses capsys, not caplog: this codebase's structlog is configured with
+    PrintLoggerFactory (agents/common/logging.py), which writes straight
+    to stdout rather than through Python's stdlib logging handlers --
+    caplog only ever sees the latter, so it can't observe this output."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+
+    class _BoomOnEvaluatePage(_FakePage):
+        def evaluate(self, script, arg):
+            raise RuntimeError("execution context was destroyed")
+
+    page = _BoomOnEvaluatePage()
+    _patch_browser(monkeypatch, page)
+    _steps_queue(
+        monkeypatch,
+        [
+            ActionStep(kind="click", x=500, y=500, reasoning="click the button"),
+            ActionStep(kind="done", reasoning="done"),
+        ],
+    )
+
+    action_executor.execute_action_loop("do the thing", "https://example.test", run_id="r-log-fail")
+
+    out = capsys.readouterr().out
+    assert "click_snap_evaluate_failed" in out
+    assert "execution context was destroyed" in out
+
+
+def test_execute_step_logs_when_the_snap_moves_a_click(tmp_path, monkeypatch, capsys):
+    """The success path is logged too -- so a live run's logs show
+    whether a click actually got relocated, not just whether the
+    mechanism ran without raising. See the previous test's docstring for
+    why this uses capsys rather than caplog."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakeSnapPage(snap_result=[650.0, 410.0])
+    _patch_browser(monkeypatch, page)
+    _steps_queue(
+        monkeypatch,
+        [
+            ActionStep(kind="click", x=500, y=500, reasoning="click the button"),
+            ActionStep(kind="done", reasoning="done"),
+        ],
+    )
+
+    action_executor.execute_action_loop("do the thing", "https://example.test", run_id="r-log-moved")
+
+    assert "click_snap_moved" in capsys.readouterr().out
+
+
 def test_loop_never_raises_on_a_browser_launch_failure(tmp_path, monkeypatch):
     from agents.common.config import settings
 

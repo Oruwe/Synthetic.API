@@ -124,7 +124,7 @@ def execute_action_loop(
                 if step.kind == "stuck":
                     break
 
-                _execute_step(page, step)
+                _execute_step(page, step, run_id)
                 time.sleep(0.3)  # let the page settle before the next screenshot
             else:
                 logger.warning("action_loop_exhausted_max_steps", run_id=run_id, max_steps=max_steps)
@@ -236,7 +236,7 @@ def execute_login_and_extract(
                         )
                     )
                     break
-                _execute_step(page, click_step)
+                _execute_step(page, click_step, run_id)
                 page.keyboard.type(value)
                 logger.info("login_field_filled", run_id=run_id, field=field_label)  # never the value itself
                 steps.append(
@@ -264,7 +264,7 @@ def execute_login_and_extract(
                         ActionStep(kind="refused", reasoning=refused_reason, screenshot_path=submit_step.screenshot_path)
                     )
                 elif submit_step.kind == "click" and submit_step.x is not None and submit_step.y is not None:
-                    _execute_step(page, submit_step)
+                    _execute_step(page, submit_step, run_id)
                     steps.append(submit_step)
                     time.sleep(0.5)  # let the page navigate/settle after submit
                     confirm_step = locate(
@@ -356,7 +356,7 @@ def replay_workflow(prior: WorkflowMemory, run_id: str) -> ActionWorkflow:
                     )
 
                 page.screenshot(path=str(out_dir / f"step-{i:02d}.png"), full_page=False)
-                _execute_step(page, step)
+                _execute_step(page, step, run_id)
                 executed.append(step)
                 time.sleep(0.3)
 
@@ -459,7 +459,9 @@ _SNAP_TO_CLICKABLE_JS = """
 """
 
 
-def _snap_to_clickable(page, x: float, y: float, reasoning: str | None = None) -> tuple[float, float]:
+def _snap_to_clickable(
+    page, x: float, y: float, reasoning: str | None = None, run_id: str | None = None
+) -> tuple[float, float]:
     """Nudges a click/focus target onto the nearest real clickable element
     when the model's coordinate guess landed on the wrong spot.
 
@@ -492,21 +494,31 @@ def _snap_to_clickable(page, x: float, y: float, reasoning: str | None = None) -
     already-correct click is never moved: only a miss (or a click that
     landed on the wrong nearby element) triggers a search.
 
-    Silently falls back to the original coordinates on ANY failure (a
-    fake Page in tests with no .evaluate, a cross-origin frame, anything
-    else) -- this is a best-effort nudge, never a hard requirement for a
-    click to proceed.
+    Falls back to the original coordinates on ANY failure (a fake Page in
+    tests with no .evaluate, a cross-origin frame, anything else) -- this
+    is a best-effort nudge, never a hard requirement for a click to
+    proceed. Logged either way (a warning on failure, info on the result)
+    rather than swallowed silently: two prior live rounds of "the fix
+    should work but the exact same failure kept recurring" had no way to
+    tell, from the run's own logs, whether this function was even
+    reaching page.evaluate successfully -- this closes that blind spot.
     """
     try:
         snapped = page.evaluate(_SNAP_TO_CLICKABLE_JS, [x, y, _CLICK_SNAP_RADIUS_PX, reasoning])
-    except Exception:  # noqa: BLE001 - best-effort only, see docstring
+    except Exception as exc:  # noqa: BLE001 - best-effort only, see docstring
+        logger.warning("click_snap_evaluate_failed", run_id=run_id, error=str(exc))
         return x, y
     if snapped and len(snapped) == 2:
+        logger.info(
+            "click_snap_moved", run_id=run_id, from_x=round(x), from_y=round(y),
+            to_x=round(snapped[0]), to_y=round(snapped[1]),
+        )
         return float(snapped[0]), float(snapped[1])
+    logger.info("click_snap_unchanged", run_id=run_id, x=round(x), y=round(y))
     return x, y
 
 
-def _execute_step(page, step: ActionStep) -> None:
+def _execute_step(page, step: ActionStep, run_id: str | None = None) -> None:
     """Maps a step's normalized 0-1000 coordinates to real viewport pixels
     and performs it. Only reached for click/type/scroll -- the loop above
     breaks on done/refused/stuck before ever calling this."""
@@ -518,11 +530,11 @@ def _execute_step(page, step: ActionStep) -> None:
     if step.kind == "click":
         if real_x is None:
             raise ValueError("click action missing coordinates")
-        real_x, real_y = _snap_to_clickable(page, real_x, real_y, step.reasoning)
+        real_x, real_y = _snap_to_clickable(page, real_x, real_y, step.reasoning, run_id)
         page.mouse.click(real_x, real_y)
     elif step.kind == "type":
         if real_x is not None:
-            real_x, real_y = _snap_to_clickable(page, real_x, real_y, step.reasoning)
+            real_x, real_y = _snap_to_clickable(page, real_x, real_y, step.reasoning, run_id)
             page.mouse.click(real_x, real_y)  # focus the target field first
         page.keyboard.type(step.text or "")
     elif step.kind == "scroll":
