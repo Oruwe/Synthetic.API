@@ -24,7 +24,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
 from fastembed import TextEmbedding
@@ -191,7 +191,7 @@ def get_client() -> QdrantClient:
         # the first call each build and discard a QdrantClient/connection.
         with _client_lock:
             if _client is None:
-                _client = QdrantClient(url=settings.qdrant_url)
+                _client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key or None)
     return _client
 
 
@@ -272,7 +272,7 @@ def upsert_order(order: DelayedOrder, run_id: str, client: QdrantClient | None =
                     "flags": order.flags,
                     "extracted_at": order.extracted_at.isoformat(),
                     "point_key": point_id,
-                    "indexed_at": datetime.now(timezone.utc).isoformat(),
+                    "indexed_at": datetime.now(UTC).isoformat(),
                 },
             )
         ],
@@ -319,7 +319,7 @@ def upsert_candidate(finding: VisionFinding, run_id: str, query: str, client: Qd
                     "flags": finding.flags,
                     "status": "candidate",
                     "point_key": point_id,
-                    "indexed_at": datetime.now(timezone.utc).isoformat(),
+                    "indexed_at": datetime.now(UTC).isoformat(),
                 },
             )
         ],
@@ -494,7 +494,7 @@ def prune_old_page_chunks(max_age_hours: float | None = None) -> int:
     this cycle, same fail-open discipline as every other Qdrant call.
     """
     max_age_hours = max_age_hours if max_age_hours is not None else settings.run_retention_hours
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+    cutoff = datetime.now(UTC) - timedelta(hours=max_age_hours)
 
     try:
         client = get_client()
@@ -655,7 +655,7 @@ def record_workflow_outcome(workflow: ActionWorkflow, client: QdrantClient | Non
     the outcome.
     """
     client = client or get_client()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     domain = _domain_of(workflow.start_url)
     key = _canonical_key(domain, workflow.intent)
     point_id = _stable_uuid(key)
@@ -782,7 +782,7 @@ def prune_stale_workflows(max_age_hours: float | None = None, client: QdrantClie
     fail-open discipline as every other Qdrant call in this module.
     """
     max_age_hours = max_age_hours if max_age_hours is not None else settings.action_workflow_retention_hours
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+    cutoff = datetime.now(UTC) - timedelta(hours=max_age_hours)
 
     try:
         client = client or get_client()

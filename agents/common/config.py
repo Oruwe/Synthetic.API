@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     portal_username: str = "admin"
     portal_password: str = "admin123"
     qdrant_url: str = "http://qdrant:6333"
+    # Blank for the self-hosted docker-compose qdrant service (no auth) --
+    # required for Qdrant Cloud's free tier (see deploy/huggingface/), which
+    # rejects any request with no key at all. get_client() (qdrant_store.py)
+    # passes `api_key=qdrant_api_key or None` so this stays a no-op locally.
+    qdrant_api_key: str = ""
     qdrant_collection: str = "delayed_orders"
     qdrant_research_collection: str = "web_knowledge"
     # The new live path's collection (chunked page text, not structured

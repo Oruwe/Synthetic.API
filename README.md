@@ -690,7 +690,13 @@ real Omi device wired to `/webhook/omi` instead of the CLI script above —
 see **[DEPLOY.md](DEPLOY.md)** (Oracle Cloud's Always Free ARM VM, chosen
 so the exact compose stack above runs unmodified, plus the
 `ORCHESTRATOR_API_KEY` auth this needs before it's reachable from the open
-internet — unset locally above, deliberately not optional there).
+internet — unset locally above, deliberately not optional there). No
+credit card, or a student-verification path that didn't work? See
+**[deploy/huggingface/SETUP.md](deploy/huggingface/SETUP.md)** instead —
+a genuinely free, no-card single-container deployment to Hugging Face
+Spaces, with the same feature set aside from swapping self-hosted Qdrant
+for a free Qdrant Cloud cluster and dropping Langfuse/Postgres/Redis
+(already optional/fail-open by design, so no loss to the actual system).
 
 ## Voice & UI
 

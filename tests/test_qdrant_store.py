@@ -8,7 +8,55 @@ missed once the collection held more delayed points than that page size.
 
 from types import SimpleNamespace
 
-import agents.common.qdrant_store as qdrant_store
+from agents.common import qdrant_store
+from agents.common.config import settings
+
+
+def _reset_client_singleton(monkeypatch):
+    """get_client() caches its QdrantClient at module scope -- every test
+    that exercises get_client() itself (not just injects a fake client
+    directly, as everything else in this file does) needs a clean slate,
+    or it silently reuses whatever a previous test's call already built."""
+    monkeypatch.setattr(qdrant_store, "_client", None)
+
+
+def test_get_client_passes_no_api_key_when_unconfigured(monkeypatch):
+    """The docker-compose self-hosted qdrant service takes no auth --
+    get_client() must not send api_key="" (Qdrant Cloud's own client
+    treats a present-but-empty key differently from no key at all in some
+    versions; `None` is the unambiguous "no auth" signal)."""
+    _reset_client_singleton(monkeypatch)
+    monkeypatch.setattr(settings, "qdrant_api_key", "")
+    captured = {}
+
+    class _CapturingQdrantClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(qdrant_store, "QdrantClient", _CapturingQdrantClient)
+
+    qdrant_store.get_client()
+
+    assert captured["api_key"] is None
+
+
+def test_get_client_passes_the_real_api_key_when_configured(monkeypatch):
+    """Qdrant Cloud's free tier (see deploy/huggingface/) rejects any
+    request with no key at all -- this is the actual bug this setting was
+    added to fix."""
+    _reset_client_singleton(monkeypatch)
+    monkeypatch.setattr(settings, "qdrant_api_key", "real-cloud-key")
+    captured = {}
+
+    class _CapturingQdrantClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(qdrant_store, "QdrantClient", _CapturingQdrantClient)
+
+    qdrant_store.get_client()
+
+    assert captured["api_key"] == "real-cloud-key"
 
 
 class _FakeCollections:

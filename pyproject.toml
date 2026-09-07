@@ -34,6 +34,21 @@ dependencies = [
     "redis>=8.1.0",
 ]
 
+[project.optional-dependencies]
+# Only for deploy/huggingface/ -- a single-container deployment that
+# merges ui/app.py's Gradio UI into the same process as the Orchestrator's
+# FastAPI app (see deploy/huggingface/merged_app.py's docstring for why).
+# The docker-compose deployment keeps the UI in its own separate,
+# lightweight container (ui/Dockerfile, ui/requirements.txt) with none of
+# the main `agents` dependencies -- this group exists so gradio can be
+# added to the *same* uv-managed environment as agents/ for that one
+# single-container deployment, locked via uv.lock like everything else,
+# without pulling gradio into the docker-compose services that don't need
+# it (agents-orchestrator, agents-synthesizer never install this extra).
+hf-space = [
+    "gradio>=4.44,<6",
+]
+
 [tool.uv]
 dev-dependencies = [
     "pytest>=8.3",
