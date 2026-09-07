@@ -1,7 +1,7 @@
 """Orchestrator FastAPI app.
 
 Entry points into the whole system:
-  POST /webhook/omi   - real Omi voice-transcript webhook
+  POST /webhook/omi   - real Omi voice-transcript webhook (own auth: verify_webhook_secret)
   POST /trigger        - manual trigger for local dev/demo (same payload shape as a parsed Omi transcript)
   GET  /runs/{run_id}  - inspect a run's live state; once the Synthesizer finishes drafting,
                          `answer` (full text incl. footer, backward-compatible), `answer_text`
@@ -15,15 +15,23 @@ Entry points into the whole system:
                          PendingInputRequest's docstring (agents/common/models/dag.py) for why
                          password is handled the way it is -- never persisted, never logged,
                          never sent to the vision model.
+
+/trigger and both /runs/* routes require X-API-Key when ORCHESTRATOR_API_KEY
+is set (see auth.py) -- unset by default for local dev, but MUST be set
+before this is reachable from the open internet. /health and /ready stay
+deliberately ungated (a load balancer/uptime check needs to reach them
+without a credential); /webhook/omi carries its own separate secret
+mechanism matching Omi's own webhook auth convention.
 """
 
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 from agents.common import run_store
 from agents.common.logging import configure_logging, get_logger
 from agents.common.readiness import run_readiness_checks
 from agents.orchestrator import omi_webhook, planner
+from agents.orchestrator.auth import require_api_key
 from agents.orchestrator.executor import execute_plan, resume_plan
 from agents.web_navigator import action_handlers, page_handlers  # noqa: F401 - registers handlers
 # NOTE: agents.orchestrator.handlers, agents.web_navigator.handlers, and
@@ -69,7 +77,7 @@ def ready():
     return body
 
 
-@app.post("/trigger", response_model=TriggerResponse)
+@app.post("/trigger", response_model=TriggerResponse, dependencies=[Depends(require_api_key)])
 def trigger(req: TriggerRequest, background_tasks: BackgroundTasks) -> TriggerResponse:
     try:
         plan = planner.build_plan(req.transcript)
@@ -99,7 +107,7 @@ def webhook_omi(
     return TriggerResponse(run_id=plan.run_id, status=plan.status)
 
 
-@app.get("/runs/{run_id}")
+@app.get("/runs/{run_id}", dependencies=[Depends(require_api_key)])
 def get_run(run_id: str):
     run = run_store.load_run(run_id)
     if run is None:
@@ -112,7 +120,7 @@ class ResumeRequest(BaseModel):
     password: str | None = None
 
 
-@app.post("/runs/{run_id}/resume", response_model=TriggerResponse)
+@app.post("/runs/{run_id}/resume", response_model=TriggerResponse, dependencies=[Depends(require_api_key)])
 def resume_run(run_id: str, req: ResumeRequest, background_tasks: BackgroundTasks) -> TriggerResponse:
     run = run_store.load_run(run_id)
     if run is None:

@@ -1,9 +1,18 @@
 services:
   qdrant:
     image: qdrant/qdrant:latest
+    restart: unless-stopped
+    # Bound to the VM's own loopback only, not its public interface --
+    # agents-orchestrator/agents-synthesizer still reach this fine via
+    # the internal docker network (http://qdrant:6333), unaffected by
+    # this binding. The dashboard (localhost:6333/dashboard) stays
+    # reachable exactly as in local dev via an SSH tunnel
+    # (`ssh -L 6333:localhost:6333 <vm>`) -- see README's deployment
+    # section. Nothing here should ever be reachable from the open
+    # internet: it's the vector store, not the product.
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
     volumes:
       - qdrant_storage:/qdrant/storage
     healthcheck:
@@ -14,8 +23,12 @@ services:
 
   mock_portal:
     build: ./mock_portal
+    restart: unless-stopped
+    # Internal fixture only, reached by the agent containers via
+    # http://mock_portal:5000 on the docker network -- loopback-only on
+    # the host so it's never reachable from the public internet either.
     ports:
-      - "5000:5000"
+      - "127.0.0.1:5000:5000"
     environment:
       PORTAL_USERNAME: ${PORTAL_USERNAME:-admin}
       PORTAL_PASSWORD: ${PORTAL_PASSWORD:-admin123}
@@ -36,8 +49,14 @@ services:
   # the live demo.
   demo_target:
     build: ./demo_target
+    restart: unless-stopped
+    # Same reasoning as mock_portal above: reached internally via
+    # http://demo_target:5050, loopback-only on the host. Not something
+    # a deployment's actual visitors need to reach directly -- they see
+    # its effects through the product (the UI/API), not the fixture
+    # itself.
     ports:
-      - "5050:5050"
+      - "127.0.0.1:5050:5050"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5050/health')\""]
       interval: 5s
@@ -54,6 +73,10 @@ services:
   # only, logged) if this is unreachable at call time.
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
+    # No `ports:` at all -- never exposed to the host, only reachable via
+    # the internal docker network (redis://redis:6379), which is all any
+    # container here ever needs.
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -68,12 +91,16 @@ services:
   # start or down (see agents/common/langfuse_tracer.py).
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: langfuse
       POSTGRES_USER: langfuse
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-langfuse}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    # No `ports:` -- Langfuse reaches this over the internal docker
+    # network only; there is no reason for Postgres itself to ever be
+    # reachable from the host, let alone the public internet.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U langfuse"]
       interval: 5s
@@ -82,11 +109,21 @@ services:
 
   langfuse:
     image: langfuse/langfuse:2
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
+    # Loopback-only: Langfuse is an observability dashboard for whoever
+    # operates this deployment, not part of the product a visitor uses.
+    # Reach it via an SSH tunnel (`ssh -L 3000:localhost:3000 <vm>`, then
+    # open http://localhost:3000) -- which is also why NEXTAUTH_URL below
+    # stays "http://localhost:3000" even on a real deployment: that's the
+    # URL your own browser actually requests it at, through the tunnel.
+    # Expose this publicly instead only if you deliberately want Langfuse's
+    # own login screen to be the access control (change this binding AND
+    # NEXTAUTH_URL together).
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       DATABASE_URL: postgresql://langfuse:${POSTGRES_PASSWORD:-langfuse}@postgres:5432/langfuse
       NEXTAUTH_URL: http://localhost:3000
@@ -99,7 +136,12 @@ services:
     build:
       context: .
       dockerfile: agents/Dockerfile
+    restart: unless-stopped
     command: ["uv", "run", "uvicorn", "agents.orchestrator.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    # Public: this is the actual product's API. Its own routes require
+    # X-API-Key when ORCHESTRATOR_API_KEY is set (see agents/orchestrator/
+    # auth.py) -- MUST be set in .env before this is reachable from the
+    # open internet; see README's deployment section.
     ports:
       - "8000:8000"
     depends_on:
@@ -139,6 +181,7 @@ services:
     build:
       context: .
       dockerfile: agents/Dockerfile
+    restart: unless-stopped
     command: ["uv", "run", "python", "-m", "agents.synthesizer.main"]
     depends_on:
       qdrant:
@@ -171,10 +214,16 @@ services:
   # See ui/app.py for why voice input/output are handled the way they are.
   demo-ui:
     build: ./ui
+    restart: unless-stopped
+    # Public: this is the actual product's UI.
     ports:
       - "7860:7860"
     environment:
       ORCHESTRATOR_URL: http://agents-orchestrator:8000
+      # Must match ORCHESTRATOR_API_KEY below/in .env -- empty on both
+      # sides is fine (local dev, unauthenticated); set on one side only
+      # and every UI request gets a 401.
+      ORCHESTRATOR_API_KEY: ${ORCHESTRATOR_API_KEY:-}
     depends_on:
       agents-orchestrator:
         condition: service_started

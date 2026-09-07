@@ -48,6 +48,12 @@ import gradio as gr
 import requests
 
 ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:8000")
+# Sent as X-API-Key on every Orchestrator request when set -- matches
+# ORCHESTRATOR_API_KEY there (see agents/orchestrator/auth.py). Both
+# unset by default (local dev, unauthenticated); a real deployment sets
+# both to the same value, or every request here gets a 401.
+_API_KEY = os.environ.get("ORCHESTRATOR_API_KEY", "")
+_AUTH_HEADERS = {"X-API-Key": _API_KEY} if _API_KEY else {}
 _POLL_INTERVAL_SECONDS = 3.0
 # Generous ceiling: embed_pages' own node timeout is 180s (see
 # orchestrator/planner.py), so this needs enough headroom above that plus
@@ -103,7 +109,7 @@ def _poll_until_done_or_gate(run_id: str, waited: float = 0.0):
         time.sleep(_POLL_INTERVAL_SECONDS)
         waited += _POLL_INTERVAL_SECONDS
         try:
-            run_resp = requests.get(f"{ORCHESTRATOR_URL}/runs/{run_id}", timeout=10)
+            run_resp = requests.get(f"{ORCHESTRATOR_URL}/runs/{run_id}", headers=_AUTH_HEADERS, timeout=10)
             run_resp.raise_for_status()
         except Exception as exc:  # noqa: BLE001 - show the real error, don't crash the UI
             yield f"⚠️ Lost contact polling the run: {exc}", "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, run_id
@@ -170,7 +176,7 @@ def ask(question: str):
     yield "● Sending your question to the Orchestrator...", "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, None
 
     try:
-        resp = requests.post(f"{ORCHESTRATOR_URL}/trigger", json={"transcript": question}, timeout=10)
+        resp = requests.post(f"{ORCHESTRATOR_URL}/trigger", json={"transcript": question}, headers=_AUTH_HEADERS, timeout=10)
         resp.raise_for_status()
     except Exception as exc:  # noqa: BLE001 - show the real error, don't crash the UI
         yield f"⚠️ Could not reach the Orchestrator at {ORCHESTRATOR_URL}: {exc}", "", "", _GATE_HIDDEN, "", _GATE_HIDDEN, _GATE_HIDDEN, None
@@ -220,7 +226,7 @@ def resume_gate(run_id: str | None, email: str, password: str):
         payload["password"] = password
 
     try:
-        resp = requests.post(f"{ORCHESTRATOR_URL}/runs/{run_id}/resume", json=payload, timeout=10)
+        resp = requests.post(f"{ORCHESTRATOR_URL}/runs/{run_id}/resume", json=payload, headers=_AUTH_HEADERS, timeout=10)
         resp.raise_for_status()
     except requests.HTTPError as exc:
         detail = exc.response.json().get("detail", str(exc)) if exc.response is not None else str(exc)

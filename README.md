@@ -685,6 +685,13 @@ Then:
   it work, read the cited answer) for anyone who'd rather not use curl.
   See "Voice & UI" below for what it is and isn't.
 
+That's local dev. To put this on a real, persistent, public URL — with a
+real Omi device wired to `/webhook/omi` instead of the CLI script above —
+see **[DEPLOY.md](DEPLOY.md)** (Oracle Cloud's Always Free ARM VM, chosen
+so the exact compose stack above runs unmodified, plus the
+`ORCHESTRATOR_API_KEY` auth this needs before it's reachable from the open
+internet — unset locally above, deliberately not optional there).
+
 ## Voice & UI
 
 `docker compose up` also starts a demo UI at `http://localhost:7860`

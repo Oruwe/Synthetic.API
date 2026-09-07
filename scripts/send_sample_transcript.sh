@@ -11,6 +11,10 @@
 set -euo pipefail
 
 ORCHESTRATOR_URL="${ORCHESTRATOR_URL:-http://localhost:8000}"
+# Only set on a real deployment (see README's deployment section) --
+# ORCHESTRATOR_API_KEY unset (the default, local dev) means /trigger has
+# no auth at all, so this script needs nothing extra either way.
+API_KEY="${ORCHESTRATOR_API_KEY:-}"
 TRANSCRIPT="${1:-Check the shipping portal for delayed orders and update the team}"
 
 echo "POST ${ORCHESTRATOR_URL}/trigger"
@@ -23,8 +27,14 @@ echo
 # handle embedded control characters, which a CLI-arg transcript won't have.
 escaped_transcript=$(printf '%s' "$TRANSCRIPT" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
 
+auth_args=()
+if [ -n "$API_KEY" ]; then
+  auth_args=(-H "X-API-Key: ${API_KEY}")
+fi
+
 response=$(curl -sS -X POST "${ORCHESTRATOR_URL}/trigger" \
   -H "Content-Type: application/json" \
+  "${auth_args[@]}" \
   -d "{\"transcript\": \"${escaped_transcript}\"}")
 
 echo "$response"
@@ -43,4 +53,8 @@ fi
 echo
 echo "Run ID: ${run_id}"
 echo "Poll status with:"
-echo "  curl -s ${ORCHESTRATOR_URL}/runs/${run_id}"
+if [ -n "$API_KEY" ]; then
+  echo "  curl -s -H \"X-API-Key: \$ORCHESTRATOR_API_KEY\" ${ORCHESTRATOR_URL}/runs/${run_id}"
+else
+  echo "  curl -s ${ORCHESTRATOR_URL}/runs/${run_id}"
+fi

@@ -145,6 +145,16 @@ class Settings(BaseSettings):
     # --- Omi (verify exact webhook contract against the hackathon starter kit) ---
     omi_webhook_secret: str = ""
 
+    # --- Orchestrator API auth (see agents/orchestrator/auth.py) ---
+    # Same fail-open-if-unset posture as omi_webhook_secret: unset (the
+    # default, e.g. local `docker compose up`) leaves /trigger and
+    # /runs/* open, matching this project's existing local-dev
+    # convenience. MUST be set to a real value for any deployment
+    # reachable from the open internet -- there is otherwise no
+    # authentication at all on an API that can trigger arbitrary browser
+    # actions and read/answer any run's paused state.
+    orchestrator_api_key: str = ""
+
     # --- Langfuse ---
     langfuse_host: str = "http://langfuse:3000"
     langfuse_public_key: str = ""
