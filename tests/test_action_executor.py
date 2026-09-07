@@ -354,6 +354,99 @@ def test_execute_step_maps_normalized_coordinates_to_viewport_pixels(tmp_path, m
     assert page.mouse.clicks == [(0.0, 0.0), (1280.0, 800.0)]
 
 
+class _FakeSnapPage(_FakePage):
+    """A _FakePage that also implements .evaluate, returning whatever
+    `snap_result` is set to -- standing in for _SNAP_TO_CLICKABLE_JS's
+    real return value (a [x, y] pair, or null/None when the model's own
+    coordinate already landed on something clickable)."""
+
+    def __init__(self, snap_result):
+        super().__init__()
+        self.snap_result = snap_result
+        self.evaluate_calls = []
+
+    def evaluate(self, script, arg):
+        self.evaluate_calls.append(arg)
+        return self.snap_result
+
+
+def test_execute_step_snaps_a_click_onto_a_nearby_clickable_element(tmp_path, monkeypatch):
+    """Found live: a manual browser test proved demo_target's gate forms
+    work fine, isolating a run's repeated failed "submit" clicks to the
+    model's own coordinate guess landing on dead space next to the real
+    button. When the page-side snap logic finds a real clickable element
+    near the model's guess, the click must land THERE, not at the raw
+    model coordinates."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakeSnapPage(snap_result=[650.0, 410.0])  # the button's real center, a bit off from the model's guess
+    _patch_browser(monkeypatch, page)
+    _steps_queue(
+        monkeypatch,
+        [
+            ActionStep(kind="click", x=500, y=500, reasoning="click the button"),
+            ActionStep(kind="done", reasoning="done"),
+        ],
+    )
+
+    action_executor.execute_action_loop("do the thing", "https://example.test", run_id="r1")
+
+    assert page.mouse.clicks == [(650.0, 410.0)]
+    assert page.evaluate_calls == [[640.0, 400.0, action_executor._CLICK_SNAP_RADIUS_PX]]
+
+
+def test_execute_step_does_not_move_a_click_already_on_a_clickable_element(tmp_path, monkeypatch):
+    """The snap JS returns null when the model's own coordinate is
+    already on something clickable -- an already-correct click must be
+    executed exactly where the model aimed it, never relocated onto some
+    other nearby control."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+    page = _FakeSnapPage(snap_result=None)
+    _patch_browser(monkeypatch, page)
+    _steps_queue(
+        monkeypatch,
+        [
+            ActionStep(kind="click", x=500, y=500, reasoning="click the button"),
+            ActionStep(kind="done", reasoning="done"),
+        ],
+    )
+
+    action_executor.execute_action_loop("do the thing", "https://example.test", run_id="r1")
+
+    assert page.mouse.clicks == [(640.0, 400.0)]  # unchanged: (500/1000)*1280, (500/1000)*800
+
+
+def test_execute_step_click_survives_evaluate_raising(tmp_path, monkeypatch):
+    """A page that can't run .evaluate at all (a fake without it, a
+    cross-origin frame, anything) must fall back to the model's raw
+    coordinates rather than fail the step."""
+    from agents.common.config import settings
+
+    monkeypatch.setattr(settings, "screenshot_dir", str(tmp_path))
+
+    class _BoomOnEvaluatePage(_FakePage):
+        def evaluate(self, script, arg):
+            raise RuntimeError("execution context was destroyed")
+
+    page = _BoomOnEvaluatePage()
+    _patch_browser(monkeypatch, page)
+    _steps_queue(
+        monkeypatch,
+        [
+            ActionStep(kind="click", x=500, y=500, reasoning="click the button"),
+            ActionStep(kind="done", reasoning="done"),
+        ],
+    )
+
+    workflow = action_executor.execute_action_loop("do the thing", "https://example.test", run_id="r1")
+
+    assert workflow.success is True
+    assert page.mouse.clicks == [(640.0, 400.0)]  # fell back to the raw coordinates
+
+
 def test_loop_never_raises_on_a_browser_launch_failure(tmp_path, monkeypatch):
     from agents.common.config import settings
 

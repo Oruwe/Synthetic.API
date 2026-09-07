@@ -398,6 +398,76 @@ def extract_visible_text(page) -> str:
     return (page.inner_text("body") or "").strip()[:20000]
 
 
+# How far (in real screenshot pixels) to search for a nearby clickable
+# element when the model's own coordinate guess misses one -- generous
+# enough to forgive a modest vision-grounding miss, tight enough not to
+# grab an unrelated control several UI elements away.
+_CLICK_SNAP_RADIUS_PX = 60
+
+_SNAP_TO_CLICKABLE_JS = """
+([x, y, radius]) => {
+    const isClickable = (el) => {
+        if (!el) return false;
+        if (["BUTTON", "A", "INPUT", "TEXTAREA", "SELECT", "LABEL"].includes(el.tagName)) return true;
+        const role = el.getAttribute && el.getAttribute("role");
+        if (role && ["button", "link", "checkbox", "radio", "tab"].includes(role)) return true;
+        return window.getComputedStyle(el).cursor === "pointer";
+    };
+    if (isClickable(document.elementFromPoint(x, y))) return null;  // already on target, don't touch it
+
+    const candidates = document.querySelectorAll(
+        "button, a, input, textarea, select, [role=button], [role=link], [onclick]"
+    );
+    let best = null;
+    let bestDist = radius;
+    for (const el of candidates) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const dist = Math.hypot(cx - x, cy - y);
+        if (dist < bestDist) {
+            bestDist = dist;
+            best = [cx, cy];
+        }
+    }
+    return best;
+}
+"""
+
+
+def _snap_to_clickable(page, x: float, y: float) -> tuple[float, float]:
+    """Nudges a click/focus target onto the nearest real clickable element
+    when the model's coordinate guess landed on dead space instead of it.
+
+    Found live: a manual browser test proved demo_target's gate forms
+    work fine end to end, which isolated a live run's repeated failed
+    "submit" clicks (same reasoning, same non-progress, every attempt) to
+    vision-grounding pixel imprecision in the model's own coordinate
+    guess -- not a page bug, and not something a navigation-timing fix
+    could touch. The model still does 100% of the visual reasoning (what
+    to click and roughly where); this only makes EXECUTION forgiving of a
+    modest miss, the same way a real mouse click a few pixels off a
+    button's edge still usually "counts" for a human. It only ever moves
+    a click that missed -- document.elementFromPoint at the model's exact
+    coordinate already being clickable returns null (no nudge) rather
+    than risk relocating an already-correct click onto some other nearby
+    control.
+
+    Silently falls back to the original coordinates on ANY failure (a
+    fake Page in tests with no .evaluate, a cross-origin frame, anything
+    else) -- this is a best-effort nudge, never a hard requirement for a
+    click to proceed.
+    """
+    try:
+        snapped = page.evaluate(_SNAP_TO_CLICKABLE_JS, [x, y, _CLICK_SNAP_RADIUS_PX])
+    except Exception:  # noqa: BLE001 - best-effort only, see docstring
+        return x, y
+    if snapped and len(snapped) == 2:
+        return float(snapped[0]), float(snapped[1])
+    return x, y
+
+
 def _execute_step(page, step: ActionStep) -> None:
     """Maps a step's normalized 0-1000 coordinates to real viewport pixels
     and performs it. Only reached for click/type/scroll -- the loop above
@@ -410,9 +480,11 @@ def _execute_step(page, step: ActionStep) -> None:
     if step.kind == "click":
         if real_x is None:
             raise ValueError("click action missing coordinates")
+        real_x, real_y = _snap_to_clickable(page, real_x, real_y)
         page.mouse.click(real_x, real_y)
     elif step.kind == "type":
         if real_x is not None:
+            real_x, real_y = _snap_to_clickable(page, real_x, real_y)
             page.mouse.click(real_x, real_y)  # focus the target field first
         page.keyboard.type(step.text or "")
     elif step.kind == "scroll":
