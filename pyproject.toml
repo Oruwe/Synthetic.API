@@ -47,7 +47,7 @@ dependencies = [
 # that don't need it (agents-orchestrator, agents-synthesizer never
 # install this extra).
 hf-space = [
-    "gradio>=4.44,<6",
+    "gradio>=4.44,<7",
 ]
 
 # --- Dependency groups for ui/, mock_portal/, demo_target/ -----------------
@@ -68,7 +68,7 @@ hf-space = [
 # was the whole reason these were separate files in the first place.
 [dependency-groups]
 ui = [
-    "gradio>=4.44,<6",
+    "gradio>=4.44,<7",
     "requests>=2.32",
 ]
 mock-portal = [
